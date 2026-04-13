@@ -4,7 +4,7 @@
 
 ## 1) 进入项目目录
 ```bash
-cd /Users/ericfeng/Documents/Sustech/26Spring-MIP/26Spring_MIP_SurgicalTeachingSys/vesselme
+cd .../vesselme
 ```
 
 ## 2) 使用 conda 环境（推荐）
@@ -36,15 +36,16 @@ python -m vesselme.main
 ## 5) 常用快捷键
 - `B`：画笔
 - `E`：橡皮
-- `Ctrl + 左键拖动`：调整画笔大小
-- `Shift + 左键`：临时橡皮
+- `Ctrl + 鼠标滚轮`：调整画笔大小
+- `鼠标右键`：临时橡皮
 - `中键拖动` 或 `Space + 左键`：平移
-- `右键拖动` / 滚轮：缩放
+- `滚轮`：缩放
 - `A`：显示/隐藏标注层
 - `Ctrl+Z / Ctrl+Y`：撤销 / 重做
+- `[` / `]`：缩小 / 增大画笔
+- `1~9`：切换标签
 - `S` 或 `Ctrl+S`：保存当前标签
+- `← / →`：切换上一张 / 下一张图片
 
-## 6) 锁定与缩放灵敏度
+## 6) 锁定
 - 右侧 `Toggle Lock` 可锁定当前标签，锁定后禁止绘制、清空、撤销、重做。
-- `Right-drag zoom sensitivity` 控制右键拖动缩放灵敏度：数值越小越敏感。
-- 该设置保存在 `~/.vesselme_config.json`。

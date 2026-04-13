@@ -62,9 +62,6 @@ class CanvasWidget(QWidget):
 
         self.last_image_pos: tuple[int, int] | None = None
         self.last_image_pos_float: tuple[float, float] | None = None
-        self.ctrl_resize_active = False
-        self.ctrl_resize_anchor_x = 0
-        self.ctrl_resize_base = self.brush_size
         self.stroke_last_point: tuple[float, float] | None = None
 
         self.pan_active = False
@@ -351,12 +348,6 @@ class CanvasWidget(QWidget):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
 
-        if event.button() == Qt.MouseButton.LeftButton and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            self.ctrl_resize_active = True
-            self.ctrl_resize_anchor_x = event.pos().x()
-            self.ctrl_resize_base = self.brush_size
-            return
-
         if event.button() not in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
             return
 
@@ -376,7 +367,6 @@ class CanvasWidget(QWidget):
         self.stroke_state.mode = (
             "eraser"
             if event.button() == Qt.MouseButton.RightButton
-            or event.modifiers() & Qt.KeyboardModifier.ShiftModifier
             or self.current_tool == "eraser"
             else "brush"
         )
@@ -396,14 +386,6 @@ class CanvasWidget(QWidget):
         else:
             self.last_image_pos = None
 
-        if self.ctrl_resize_active:
-            delta = event.pos().x() - self.ctrl_resize_anchor_x
-            new_size = self.ctrl_resize_base + (delta / 10.0)
-            if new_size != self.brush_size:
-                self.set_brush_size(new_size)
-            self.update()
-            return
-
         if self.pan_active:
             delta = event.pos() - self.drag_anchor
             self.offset = QPointF(self.offset.x() + delta.x(), self.offset.y() + delta.y())
@@ -420,10 +402,6 @@ class CanvasWidget(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        if self.ctrl_resize_active and event.button() == Qt.MouseButton.LeftButton:
-            self.ctrl_resize_active = False
-            self._sync_cursor()
-            return
         if self.pan_active and (
             event.button() == Qt.MouseButton.MiddleButton or event.button() == Qt.MouseButton.LeftButton
         ):
