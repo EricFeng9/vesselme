@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QColorDialog,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -18,11 +23,15 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStatusBar,
     QSlider,
+    QTableWidget,
+    QTableWidgetItem,
     QToolBar,
     QToolButton,
+    QMenu,
     QVBoxLayout,
     QWidget,
 )
@@ -37,6 +46,8 @@ from vesselme.ui.icons import delete_icon, eye_icon, lock_icon, rename_icon
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        self.current_language = "en"
+        self._zh_translations = self._load_zh_translations()
         self.setWindowTitle("VesselMe - Fundus Vessel Annotation")
         self.resize(1500, 920)
 
@@ -52,6 +63,22 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._bind_shortcuts()
 
+    def _load_zh_translations(self) -> dict[str, str]:
+        path = Path(__file__).resolve().parents[1] / "data" / "i18n_zh_CN.json"
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items()}
+        except Exception:
+            pass
+        return {}
+
+    def _tr(self, key: str, default: str) -> str:
+        if self.current_language == "zh":
+            return self._zh_translations.get(key, default)
+        return default
+
     def _build_ui(self) -> None:
         file_panel = QWidget()
         file_panel.setObjectName("panel")
@@ -60,12 +87,12 @@ class MainWindow(QMainWindow):
         file_layout.setSpacing(8)
 
         file_header = QHBoxLayout()
-        file_title = QLabel("Project Files")
-        file_title.setProperty("sectionTitle", True)
+        self.file_title = QLabel("Project Files")
+        self.file_title.setProperty("sectionTitle", True)
         self.btn_open_folder = QPushButton("Open Folder")
         self.btn_open_folder.setObjectName("primary")
         self.btn_open_folder.clicked.connect(self.open_folder)
-        file_header.addWidget(file_title)
+        file_header.addWidget(self.file_title)
         file_header.addStretch(1)
         file_header.addWidget(self.btn_open_folder)
 
@@ -90,11 +117,11 @@ class MainWindow(QMainWindow):
         canvas_layout.setSpacing(6)
 
         canvas_title_row = QHBoxLayout()
-        canvas_title = QLabel("Canvas")
-        canvas_title.setProperty("sectionTitle", True)
+        self.canvas_title = QLabel("Canvas")
+        self.canvas_title.setProperty("sectionTitle", True)
         self.canvas_hint = QLabel("Wheel to zoom  |  Right click to erase  |  Space+Drag to pan")
         self.canvas_hint.setProperty("muted", True)
-        canvas_title_row.addWidget(canvas_title)
+        canvas_title_row.addWidget(self.canvas_title)
         canvas_title_row.addStretch(1)
         canvas_title_row.addWidget(self.canvas_hint)
 
@@ -118,15 +145,15 @@ class MainWindow(QMainWindow):
         label_layout.setContentsMargins(10, 10, 10, 10)
         label_layout.setSpacing(8)
 
-        label_title = QLabel("Labels")
-        label_title.setProperty("sectionTitle", True)
+        self.label_title = QLabel("Labels")
+        self.label_title.setProperty("sectionTitle", True)
         self.label_list = QListWidget()
         self.label_list.currentItemChanged.connect(self._on_label_selected_item)
 
         row1 = QHBoxLayout()
         self.btn_new_label = QPushButton("New")
         self.btn_new_label.clicked.connect(self.create_label)
-        self.btn_import = QPushButton("Import .tar")
+        self.btn_import = QPushButton("Import label (.tar)")
         self.btn_import.clicked.connect(self.import_label)
         row1.addWidget(self.btn_new_label)
         row1.addWidget(self.btn_import)
@@ -172,12 +199,14 @@ class MainWindow(QMainWindow):
         opacity_row.addWidget(self.opacity_slider, 1)
         opacity_row.addWidget(self.opacity_value_label)
 
-        label_layout.addWidget(label_title)
+        label_layout.addWidget(self.label_title)
         label_layout.addWidget(self.label_list, 1)
         label_layout.addLayout(row1)
-        label_layout.addWidget(QLabel("Brush size"))
+        self.brush_size_title = QLabel("Brush size")
+        label_layout.addWidget(self.brush_size_title)
         label_layout.addLayout(brush_row)
-        label_layout.addWidget(QLabel("Opacity"))
+        self.opacity_title = QLabel("Opacity")
+        label_layout.addWidget(self.opacity_title)
         label_layout.addLayout(opacity_row)
         label_layout.addLayout(row4)
 
@@ -204,39 +233,65 @@ class MainWindow(QMainWindow):
         main_toolbar.setMovable(False)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, main_toolbar)
 
-        open_action = QAction("Open Folder", self)
-        open_action.setShortcut(QKeySequence("Ctrl+O"))
-        open_action.triggered.connect(self.open_folder)
-        main_toolbar.addAction(open_action)
+        self.toolbar_open_action = QAction("Open Folder", self)
+        self.toolbar_open_action.setShortcut(QKeySequence("Ctrl+O"))
+        self.toolbar_open_action.setToolTip("Choose an image folder and load all supported files for annotation.")
+        self.toolbar_open_action.triggered.connect(self.open_folder)
+        main_toolbar.addAction(self.toolbar_open_action)
         main_toolbar.addSeparator()
 
-        save_action = QAction("Save", self)
-        save_action.setShortcut(QKeySequence("Ctrl+S"))
-        save_action.triggered.connect(self.save_current_label)
-        main_toolbar.addAction(save_action)
+        self.toolbar_save_action = QAction("Save", self)
+        self.toolbar_save_action.setShortcut(QKeySequence("Ctrl+S"))
+        self.toolbar_save_action.setToolTip("Save the currently selected label mask to its .tar file.")
+        self.toolbar_save_action.triggered.connect(self.save_current_label)
+        main_toolbar.addAction(self.toolbar_save_action)
 
-        import_action = QAction("Import .tar", self)
-        import_action.triggered.connect(self.import_label)
-        main_toolbar.addAction(import_action)
+        self.toolbar_import_action = QAction("Import label (.tar)", self)
+        self.toolbar_import_action.setToolTip("Import a .tar label package into memory for the current image.")
+        self.toolbar_import_action.triggered.connect(self.import_label)
+        main_toolbar.addAction(self.toolbar_import_action)
 
-        import_image_action = QAction("Import from image", self)
-        import_image_action.triggered.connect(self.import_label_from_image)
-        main_toolbar.addAction(import_image_action)
+        self.toolbar_import_image_action = QAction("Import from image", self)
+        self.toolbar_import_image_action.setToolTip("Import a mask image, binarize it, and attach it to a label.")
+        self.toolbar_import_image_action.triggered.connect(self.import_label_from_image)
+        main_toolbar.addAction(self.toolbar_import_image_action)
 
-        export_action = QAction("Export PNG", self)
-        export_action.triggered.connect(self.export_stroke)
-        main_toolbar.addAction(export_action)
+        self.toolbar_export_action = QAction("Export PNG", self)
+        self.toolbar_export_action.setToolTip("Export the current label as a black-background PNG preview.")
+        self.toolbar_export_action.triggered.connect(self.export_stroke)
+        main_toolbar.addAction(self.toolbar_export_action)
         main_toolbar.addSeparator()
 
-        prev_action = QAction("Prev", self)
-        prev_action.setShortcut(QKeySequence(Qt.Key.Key_Left))
-        prev_action.triggered.connect(self.prev_image)
-        main_toolbar.addAction(prev_action)
+        self.toolbar_prev_action = QAction("Prev", self)
+        self.toolbar_prev_action.setShortcut(QKeySequence(Qt.Key.Key_Left))
+        self.toolbar_prev_action.setToolTip("Go to the previous image in the current folder.")
+        self.toolbar_prev_action.triggered.connect(self.prev_image)
+        main_toolbar.addAction(self.toolbar_prev_action)
 
-        next_action = QAction("Next", self)
-        next_action.setShortcut(QKeySequence(Qt.Key.Key_Right))
-        next_action.triggered.connect(self.next_image)
-        main_toolbar.addAction(next_action)
+        self.toolbar_next_action = QAction("Next", self)
+        self.toolbar_next_action.setShortcut(QKeySequence(Qt.Key.Key_Right))
+        self.toolbar_next_action.setToolTip("Go to the next image in the current folder.")
+        self.toolbar_next_action.triggered.connect(self.next_image)
+        main_toolbar.addAction(self.toolbar_next_action)
+
+        toolbar_spacer = QWidget()
+        toolbar_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        main_toolbar.addWidget(toolbar_spacer)
+
+        self.lang_menu_button = QToolButton()
+        self.lang_menu_button.setObjectName("langMenuButton")
+        self.lang_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.lang_menu_button.setText("EN ▾")
+        self.lang_menu_button.setToolTip("Switch UI language")
+        self.lang_menu = QMenu(self.lang_menu_button)
+        self.lang_action_en = self.lang_menu.addAction("English")
+        self.lang_action_en.setCheckable(True)
+        self.lang_action_en.triggered.connect(lambda: self.set_language("en"))
+        self.lang_action_zh = self.lang_menu.addAction("中文")
+        self.lang_action_zh.setCheckable(True)
+        self.lang_action_zh.triggered.connect(lambda: self.set_language("zh"))
+        self.lang_menu_button.setMenu(self.lang_menu)
+        main_toolbar.addWidget(self.lang_menu_button)
 
         left_toolbar = QToolBar("Tools")
         left_toolbar.setObjectName("leftToolsToolbar")
@@ -266,11 +321,18 @@ class MainWindow(QMainWindow):
         self.btn_clear.clicked.connect(self.clear_current_label)
         left_toolbar.addWidget(self.btn_clear)
 
+        self.btn_help_tool = QToolButton()
+        self.btn_help_tool.setText("?")
+        self.btn_help_tool.setToolTip("Quick tutorial")
+        self.btn_help_tool.clicked.connect(self.show_quick_tutorial)
+        left_toolbar.addWidget(self.btn_help_tool)
+
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         self._build_actions()
         self._set_tool_buttons()
         self._apply_theme()
+        self._apply_language()
         self._update_status()
 
     def _set_tool_buttons(self) -> None:
@@ -391,6 +453,27 @@ class MainWindow(QMainWindow):
                 padding: 0;
                 font-size: 16px;
             }
+            QToolButton#langMenuButton {
+                min-width: 56px;
+                max-width: 64px;
+                padding: 4px 8px;
+                border-radius: 14px;
+                border: 1px solid #9fb3c8;
+                background: #f0f4f8;
+                color: #334e68;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QToolButton#langMenuButton:hover {
+                background: #e6edf5;
+            }
+            QToolButton#langMenuButton:pressed {
+                background: #d9e2ec;
+            }
+            QToolButton#langMenuButton::menu-indicator {
+                image: none;
+                width: 0px;
+            }
             QLineEdit, QDoubleSpinBox {
                 background: #ffffff;
                 border: 1px solid #bcccdc;
@@ -407,79 +490,313 @@ class MainWindow(QMainWindow):
     def _build_actions(self) -> None:
         menubar = self.menuBar()
 
-        file_menu = menubar.addMenu("File")
-        open_action = QAction("Open Folder", self)
-        open_action.setShortcut(QKeySequence("Ctrl+O"))
-        open_action.triggered.connect(self.open_folder)
-        file_menu.addAction(open_action)
+        self.file_menu = menubar.addMenu("File")
+        self.menu_open_action = QAction("Open Folder", self)
+        self.menu_open_action.setShortcut(QKeySequence("Ctrl+O"))
+        self.menu_open_action.triggered.connect(self.open_folder)
+        self.file_menu.addAction(self.menu_open_action)
 
-        save_action = QAction("Save Current Label", self)
-        save_action.setShortcut(QKeySequence("Ctrl+S"))
-        save_action.triggered.connect(self.save_current_label)
-        file_menu.addAction(save_action)
+        self.menu_save_action = QAction("Save Current Label", self)
+        self.menu_save_action.setShortcut(QKeySequence("Ctrl+S"))
+        self.menu_save_action.triggered.connect(self.save_current_label)
+        self.file_menu.addAction(self.menu_save_action)
 
-        import_action = QAction("Import Label Tar", self)
-        import_action.triggered.connect(self.import_label)
-        file_menu.addAction(import_action)
+        self.menu_import_action = QAction("Import Label Tar", self)
+        self.menu_import_action.triggered.connect(self.import_label)
+        self.file_menu.addAction(self.menu_import_action)
 
-        import_image_action = QAction("Import Label from Image", self)
-        import_image_action.triggered.connect(self.import_label_from_image)
-        file_menu.addAction(import_image_action)
+        self.menu_import_image_action = QAction("Import Label from Image", self)
+        self.menu_import_image_action.triggered.connect(self.import_label_from_image)
+        self.file_menu.addAction(self.menu_import_image_action)
 
-        export_action = QAction("Export Stroke PNG", self)
-        export_action.triggered.connect(self.export_stroke)
-        file_menu.addAction(export_action)
+        self.menu_export_action = QAction("Export Stroke PNG", self)
+        self.menu_export_action.triggered.connect(self.export_stroke)
+        self.file_menu.addAction(self.menu_export_action)
 
-        nav_menu = menubar.addMenu("Navigate")
-        prev_action = QAction("Previous Image", self)
-        prev_action.setShortcut(QKeySequence(Qt.Key.Key_Left))
-        prev_action.triggered.connect(self.prev_image)
-        nav_menu.addAction(prev_action)
+        self.nav_menu = menubar.addMenu("Navigate")
+        self.menu_prev_action = QAction("Previous Image", self)
+        self.menu_prev_action.setShortcut(QKeySequence(Qt.Key.Key_Left))
+        self.menu_prev_action.triggered.connect(self.prev_image)
+        self.nav_menu.addAction(self.menu_prev_action)
 
-        next_action = QAction("Next Image", self)
-        next_action.setShortcut(QKeySequence(Qt.Key.Key_Right))
-        next_action.triggered.connect(self.next_image)
-        nav_menu.addAction(next_action)
+        self.menu_next_action = QAction("Next Image", self)
+        self.menu_next_action.setShortcut(QKeySequence(Qt.Key.Key_Right))
+        self.menu_next_action.triggered.connect(self.next_image)
+        self.nav_menu.addAction(self.menu_next_action)
 
-        view_menu = menubar.addMenu("View")
-        fit_action = QAction("Fit to Window", self)
-        fit_action.triggered.connect(self.canvas.fit_to_window)
-        view_menu.addAction(fit_action)
+        self.view_menu = menubar.addMenu("View")
+        self.menu_fit_action = QAction("Fit to Window", self)
+        self.menu_fit_action.triggered.connect(self.canvas.fit_to_window)
+        self.view_menu.addAction(self.menu_fit_action)
 
-        one_action = QAction("Actual Size (1:1)", self)
-        one_action.triggered.connect(self.canvas.actual_size)
-        view_menu.addAction(one_action)
+        self.menu_actual_size_action = QAction("Actual Size (1:1)", self)
+        self.menu_actual_size_action.triggered.connect(self.canvas.actual_size)
+        self.view_menu.addAction(self.menu_actual_size_action)
 
-        edit_menu = menubar.addMenu("Edit")
-        undo_action = QAction("Undo", self)
-        undo_action.setShortcut(QKeySequence("Ctrl+Z"))
-        undo_action.triggered.connect(self.undo)
-        edit_menu.addAction(undo_action)
+        self.edit_menu = menubar.addMenu("Edit")
+        self.menu_undo_action = QAction("Undo", self)
+        self.menu_undo_action.setShortcut(QKeySequence("Ctrl+Z"))
+        self.menu_undo_action.triggered.connect(self.undo)
+        self.edit_menu.addAction(self.menu_undo_action)
 
-        redo_action = QAction("Redo", self)
-        redo_action.setShortcut(QKeySequence("Ctrl+Y"))
-        redo_action.triggered.connect(self.redo)
-        edit_menu.addAction(redo_action)
+        self.menu_redo_action = QAction("Redo", self)
+        self.menu_redo_action.setShortcut(QKeySequence("Ctrl+Y"))
+        self.menu_redo_action.triggered.connect(self.redo)
+        self.edit_menu.addAction(self.menu_redo_action)
 
-        brush_inc = QAction("Brush +", self)
-        brush_inc.setShortcut(QKeySequence("]"))
-        brush_inc.triggered.connect(lambda: self._set_brush(self.canvas.brush_size + 1))
-        edit_menu.addAction(brush_inc)
+        self.menu_brush_inc_action = QAction("Brush +", self)
+        self.menu_brush_inc_action.setShortcut(QKeySequence("]"))
+        self.menu_brush_inc_action.triggered.connect(lambda: self._set_brush(self.canvas.brush_size + 1))
+        self.edit_menu.addAction(self.menu_brush_inc_action)
 
-        brush_dec = QAction("Brush -", self)
-        brush_dec.setShortcut(QKeySequence("["))
-        brush_dec.triggered.connect(lambda: self._set_brush(self.canvas.brush_size - 1))
-        edit_menu.addAction(brush_dec)
+        self.menu_brush_dec_action = QAction("Brush -", self)
+        self.menu_brush_dec_action.setShortcut(QKeySequence("["))
+        self.menu_brush_dec_action.triggered.connect(lambda: self._set_brush(self.canvas.brush_size - 1))
+        self.edit_menu.addAction(self.menu_brush_dec_action)
 
-        s_action = QAction("Save (S)", self)
-        s_action.setShortcut(QKeySequence("S"))
-        s_action.triggered.connect(self.save_current_label)
-        edit_menu.addAction(s_action)
+        self.menu_save_s_action = QAction("Save (S)", self)
+        self.menu_save_s_action.setShortcut(QKeySequence("S"))
+        self.menu_save_s_action.triggered.connect(self.save_current_label)
+        self.edit_menu.addAction(self.menu_save_s_action)
 
-        toggle_overlay_action = QAction("Toggle Overlay", self)
-        toggle_overlay_action.setShortcut(QKeySequence("A"))
-        toggle_overlay_action.triggered.connect(self.toggle_overlay)
-        edit_menu.addAction(toggle_overlay_action)
+        self.menu_toggle_overlay_action = QAction("Toggle Overlay", self)
+        self.menu_toggle_overlay_action.setShortcut(QKeySequence("A"))
+        self.menu_toggle_overlay_action.triggered.connect(self.toggle_overlay)
+        self.edit_menu.addAction(self.menu_toggle_overlay_action)
+
+    def set_language(self, language: str) -> None:
+        if language not in {"en", "zh"}:
+            return
+        if language == self.current_language:
+            return
+        self.current_language = language
+        self._apply_language()
+        self._refresh_labels()
+        if self.current_image_index >= 0:
+            self._refresh_file_row(self.current_image_index)
+        self._update_status()
+
+    def _apply_language(self) -> None:
+        self.setWindowTitle(self._tr("window.title", "VesselMe - Fundus Vessel Annotation"))
+        self.file_title.setText(self._tr("panel.project_files", "Project Files"))
+        self.canvas_title.setText(self._tr("panel.canvas", "Canvas"))
+        self.label_title.setText(self._tr("panel.labels", "Labels"))
+        self.btn_open_folder.setText(self._tr("btn.open_folder", "Open Folder"))
+        self.btn_new_label.setText(self._tr("btn.new", "New"))
+        self.btn_import.setText(self._tr("btn.import_label_tar", "Import label (.tar)"))
+        self.btn_save.setText(self._tr("btn.save_ctrl_s", "Save (Ctrl+S)"))
+        self.btn_export.setText(self._tr("btn.export_stroke_png", "Export Stroke PNG"))
+        self.label_name_edit.setPlaceholderText(self._tr("placeholder.selected_label_name", "Selected label name"))
+        self.brush_size_title.setText(self._tr("label.brush_size", "Brush size"))
+        self.opacity_title.setText(self._tr("label.opacity", "Opacity"))
+        self.canvas_hint.setText(
+            self._tr(
+                "hint.canvas_ops",
+                "Wheel to zoom  |  Right click to erase  |  Space+Drag to pan",
+            )
+        )
+        self.canvas.set_empty_hint_text(
+            self._tr(
+                "hint.canvas_empty",
+                "Open Folder to start annotation\n\nB: Brush  E: Eraser  A: Toggle Overlay",
+            )
+        )
+
+        self.toolbar_open_action.setText(self._tr("toolbar.open_folder", "Open Folder"))
+        self.toolbar_open_action.setToolTip(
+            self._tr("tooltip.toolbar_open_folder", "Choose an image folder and load all supported files for annotation.")
+        )
+        self.toolbar_save_action.setText(self._tr("toolbar.save", "Save"))
+        self.toolbar_save_action.setToolTip(
+            self._tr("tooltip.toolbar_save", "Save the currently selected label mask to its .tar file.")
+        )
+        self.toolbar_import_action.setText(self._tr("toolbar.import_label_tar", "Import label (.tar)"))
+        self.toolbar_import_action.setToolTip(
+            self._tr("tooltip.toolbar_import_tar", "Import a .tar label package into memory for the current image.")
+        )
+        self.toolbar_import_image_action.setText(self._tr("toolbar.import_from_image", "Import from image"))
+        self.toolbar_import_image_action.setToolTip(
+            self._tr("tooltip.toolbar_import_image", "Import a mask image, binarize it, and attach it to a label.")
+        )
+        self.toolbar_export_action.setText(self._tr("toolbar.export_png", "Export PNG"))
+        self.toolbar_export_action.setToolTip(
+            self._tr("tooltip.toolbar_export_png", "Export the current label as a black-background PNG preview.")
+        )
+        self.toolbar_prev_action.setText(self._tr("toolbar.prev", "Prev"))
+        self.toolbar_prev_action.setToolTip(
+            self._tr("tooltip.toolbar_prev", "Go to the previous image in the current folder.")
+        )
+        self.toolbar_next_action.setText(self._tr("toolbar.next", "Next"))
+        self.toolbar_next_action.setToolTip(
+            self._tr("tooltip.toolbar_next", "Go to the next image in the current folder.")
+        )
+
+        self.btn_brush_tool.setToolTip(self._tr("tooltip.brush", "Brush (B)"))
+        self.btn_eraser_tool.setToolTip(self._tr("tooltip.eraser", "Eraser (E)"))
+        self.btn_clear.setToolTip(self._tr("tooltip.clear_label", "Clear Label"))
+        self.btn_help_tool.setToolTip(self._tr("tooltip.quick_tutorial", "Quick tutorial"))
+
+        self.lang_menu_button.setText("EN ▾" if self.current_language == "en" else "中 ▾")
+        self.lang_menu_button.setToolTip(self._tr("tooltip.switch_language", "Switch UI language"))
+        self.lang_action_en.setText(self._tr("language.english", "English"))
+        self.lang_action_zh.setText(self._tr("language.chinese", "中文"))
+        self.lang_action_en.setChecked(self.current_language == "en")
+        self.lang_action_zh.setChecked(self.current_language == "zh")
+
+        self.file_menu.setTitle(self._tr("menu.file", "File"))
+        self.nav_menu.setTitle(self._tr("menu.navigate", "Navigate"))
+        self.view_menu.setTitle(self._tr("menu.view", "View"))
+        self.edit_menu.setTitle(self._tr("menu.edit", "Edit"))
+        self.menu_open_action.setText(self._tr("menu.open_folder", "Open Folder"))
+        self.menu_save_action.setText(self._tr("menu.save_current_label", "Save Current Label"))
+        self.menu_import_action.setText(self._tr("menu.import_label_tar", "Import Label Tar"))
+        self.menu_import_image_action.setText(self._tr("menu.import_label_from_image", "Import Label from Image"))
+        self.menu_export_action.setText(self._tr("menu.export_stroke_png", "Export Stroke PNG"))
+        self.menu_prev_action.setText(self._tr("menu.previous_image", "Previous Image"))
+        self.menu_next_action.setText(self._tr("menu.next_image", "Next Image"))
+        self.menu_fit_action.setText(self._tr("menu.fit_to_window", "Fit to Window"))
+        self.menu_actual_size_action.setText(self._tr("menu.actual_size", "Actual Size (1:1)"))
+        self.menu_undo_action.setText(self._tr("menu.undo", "Undo"))
+        self.menu_redo_action.setText(self._tr("menu.redo", "Redo"))
+        self.menu_brush_inc_action.setText(self._tr("menu.brush_plus", "Brush +"))
+        self.menu_brush_dec_action.setText(self._tr("menu.brush_minus", "Brush -"))
+        self.menu_save_s_action.setText(self._tr("menu.save_s", "Save (S)"))
+        self.menu_toggle_overlay_action.setText(self._tr("menu.toggle_overlay", "Toggle Overlay"))
+
+        root_display = str(self.project_service.root_dir) if self.project_service.root_dir is not None else "-"
+        self.folder_label.setText(f"{self._tr('label.folder', 'Folder')}: {root_display}")
+        self.file_summary_label.setText(self._tr("label.images_count", "{count} images").format(count=len(self.images)))
+
+    def show_quick_tutorial(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self._tr("tutorial.window_title", "VesselMe Quick Guide"))
+        dialog.setMinimumSize(760, 560)
+        dialog.setStyleSheet(
+            """
+            QDialog {
+                background: #f8fafc;
+            }
+            QLabel#guideTitle {
+                font-size: 22px;
+                font-weight: 700;
+                color: #102a43;
+            }
+            QLabel#guideSubtitle {
+                font-size: 13px;
+                color: #486581;
+            }
+            QLabel#sectionTitle {
+                font-size: 14px;
+                font-weight: 700;
+                color: #243b53;
+                padding-top: 6px;
+            }
+            QLabel#bodyText {
+                font-size: 13px;
+                color: #243b53;
+            }
+            QTableWidget {
+                background: #ffffff;
+                border: 1px solid #d9e2ec;
+                border-radius: 8px;
+                gridline-color: #e4e7eb;
+                font-size: 13px;
+                color: #102a43;
+            }
+            QHeaderView::section {
+                background: #eef2f7;
+                color: #243b53;
+                padding: 6px;
+                border: none;
+                border-bottom: 1px solid #d9e2ec;
+                font-weight: 600;
+            }
+            """
+        )
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 18, 20, 14)
+        layout.setSpacing(10)
+
+        title = QLabel(self._tr("tutorial.title", "VesselMe Annotation Guide"))
+        title.setObjectName("guideTitle")
+
+        subtitle = QLabel(
+            self._tr(
+                "tutorial.subtitle",
+                "VesselMe is a local annotation tool for fundus vessel segmentation. "
+                "Each label is edited in memory and saved as a separate .tar package.",
+            )
+        )
+        subtitle.setObjectName("guideSubtitle")
+        subtitle.setWordWrap(True)
+
+        basics_title = QLabel(self._tr("tutorial.basic_workflow", "Basic Workflow"))
+        basics_title.setObjectName("sectionTitle")
+        basics = QLabel(
+            "\n".join(
+                [
+                    self._tr("tutorial.step1", "1. Open your image folder."),
+                    self._tr("tutorial.step2", "2. Pick an image from the file list."),
+                    self._tr("tutorial.step3", "3. Create a label or import one."),
+                    self._tr("tutorial.step4", "4. Paint vessels with Brush/Eraser."),
+                    self._tr("tutorial.step5", "5. Save the current label to <image>_[<label>].tar."),
+                ]
+            )
+        )
+        basics.setObjectName("bodyText")
+        basics.setWordWrap(True)
+
+        shortcuts_title = QLabel(self._tr("tutorial.shortcut_menu", "Shortcut Menu"))
+        shortcuts_title.setObjectName("sectionTitle")
+
+        shortcut_rows = [
+            (self._tr("tutorial.action.brush", "Brush"), "B"),
+            (self._tr("tutorial.action.eraser", "Eraser"), "E"),
+            (self._tr("tutorial.action.adjust_brush", "Adjust brush size"), "Ctrl + Mouse Wheel"),
+            (self._tr("tutorial.action.temp_eraser", "Temporary eraser"), self._tr("tutorial.shortcut.right_click", "Right Click")),
+            (self._tr("tutorial.action.pan_canvas", "Pan canvas"), "Space + Left Drag / Middle Drag"),
+            (self._tr("tutorial.action.zoom", "Zoom"), "Mouse Wheel"),
+            (self._tr("tutorial.action.undo_redo", "Undo / Redo"), "Ctrl+Z / Ctrl+Y"),
+            (self._tr("tutorial.action.toggle_overlay", "Toggle overlay"), "A"),
+            (self._tr("tutorial.action.brush_size_pm", "Brush size - / +"), "[ / ]"),
+            (self._tr("tutorial.action.switch_label", "Switch label"), "1 ~ 9"),
+            (self._tr("tutorial.action.save_current_label", "Save current label"), "S or Ctrl+S"),
+            (self._tr("tutorial.action.prev_next_image", "Previous / Next image"), "Left / Right Arrow"),
+        ]
+
+        table = QTableWidget(len(shortcut_rows), 2, dialog)
+        table.setHorizontalHeaderLabels(
+            [
+                self._tr("tutorial.header.action", "Action"),
+                self._tr("tutorial.header.shortcut", "Shortcut"),
+            ]
+        )
+        table.verticalHeader().setVisible(False)
+        table.setShowGrid(True)
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+
+        for row, (action_name, shortcut) in enumerate(shortcut_rows):
+            table.setItem(row, 0, QTableWidgetItem(action_name))
+            table.setItem(row, 1, QTableWidgetItem(shortcut))
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addWidget(basics_title)
+        layout.addWidget(basics)
+        layout.addWidget(shortcuts_title)
+        layout.addWidget(table, 1)
+        layout.addWidget(buttons)
+
+        dialog.exec()
 
     def _bind_shortcuts(self) -> None:
         QShortcut(QKeySequence("B"), self, activated=lambda: self.set_tool("brush"))
@@ -504,7 +821,7 @@ class MainWindow(QMainWindow):
         super().keyReleaseEvent(event)
 
     def open_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Select Image Folder")
+        folder = QFileDialog.getExistingDirectory(self, self._tr("dialog.select_image_folder", "Select Image Folder"))
         if not folder:
             return
 
@@ -512,10 +829,10 @@ class MainWindow(QMainWindow):
         try:
             self.images = self.project_service.open_folder(path)
         except Exception as exc:
-            QMessageBox.critical(self, "Open folder failed", str(exc))
+            QMessageBox.critical(self, self._tr("error.open_folder_failed", "Open folder failed"), str(exc))
             return
 
-        self.folder_label.setText(f"Folder: {path}")
+        self.folder_label.setText(f"{self._tr('label.folder', 'Folder')}: {path}")
         self._populate_file_list()
 
         if self.images:
@@ -526,8 +843,8 @@ class MainWindow(QMainWindow):
             self.label_list.clear()
             self.current_image_rgb = None
             self.canvas.update()
-            self._update_status("No images found")
-        self.file_summary_label.setText(f"{len(self.images)} images")
+            self._update_status(self._tr("status.no_images_found", "No images found"))
+        self.file_summary_label.setText(self._tr("label.images_count", "{count} images").format(count=len(self.images)))
 
     def _display_rel_path(self, item: ImageItem) -> str:
         rel_path = item.path.name
@@ -590,7 +907,7 @@ class MainWindow(QMainWindow):
             row.setSizeHint(QSize(0, 66))
             self.file_list.addItem(row)
             self.file_list.setItemWidget(row, self._build_file_row_widget(item))
-        self.file_summary_label.setText(f"{len(self.images)} images")
+        self.file_summary_label.setText(self._tr("label.images_count", "{count} images").format(count=len(self.images)))
 
     def _make_thumbnail_icon(self, image_path: Path) -> QIcon | None:
         qimg = QImage(str(image_path))
@@ -630,7 +947,7 @@ class MainWindow(QMainWindow):
         try:
             self.current_image_rgb = self.project_service.load_image_rgb(item.path)
         except Exception as exc:
-            QMessageBox.warning(self, "Image load failed", str(exc))
+            QMessageBox.warning(self, self._tr("error.image_load_failed", "Image load failed"), str(exc))
             return
 
         self._refresh_labels()
@@ -667,7 +984,9 @@ class MainWindow(QMainWindow):
             swatch = QToolButton()
             swatch.setFixedSize(14, 14)
             swatch.setObjectName("labelSwatchButton")
-            swatch.setToolTip(f"Change color of {name}")
+            swatch.setToolTip(
+                self._tr("tooltip.change_color_of_label", "Change color of {name}").format(name=name)
+            )
             swatch.setStyleSheet(
                 "QToolButton {"
                 f"background: rgb({label.display_color[0]}, {label.display_color[1]}, {label.display_color[2]});"
@@ -685,7 +1004,11 @@ class MainWindow(QMainWindow):
             eye_btn.setObjectName("labelIconButton")
             eye_btn.setIcon(eye_icon(label.visible, size=18))
             eye_btn.setIconSize(QSize(16, 16))
-            eye_btn.setToolTip("Hide label" if label.visible else "Show label")
+            eye_btn.setToolTip(
+                self._tr("tooltip.hide_label", "Hide label")
+                if label.visible
+                else self._tr("tooltip.show_label", "Show label")
+            )
             eye_btn.clicked.connect(lambda checked=False, label_name=name: self.toggle_label_visible_by_name(label_name))
 
             lock_btn = QToolButton()
@@ -693,7 +1016,11 @@ class MainWindow(QMainWindow):
             lock_btn.setObjectName("labelIconButton")
             lock_btn.setIcon(lock_icon(label.locked, size=18))
             lock_btn.setIconSize(QSize(16, 16))
-            lock_btn.setToolTip("Lock label" if not label.locked else "Unlock label")
+            lock_btn.setToolTip(
+                self._tr("tooltip.lock_label", "Lock label")
+                if not label.locked
+                else self._tr("tooltip.unlock_label", "Unlock label")
+            )
             lock_btn.clicked.connect(lambda checked=False, label_name=name: self.toggle_label_lock_by_name(label_name))
 
             rename_btn = QToolButton()
@@ -701,7 +1028,7 @@ class MainWindow(QMainWindow):
             rename_btn.setObjectName("labelIconButton")
             rename_btn.setIcon(rename_icon(size=18))
             rename_btn.setIconSize(QSize(16, 16))
-            rename_btn.setToolTip("Rename label")
+            rename_btn.setToolTip(self._tr("tooltip.rename_label", "Rename label"))
             rename_btn.clicked.connect(lambda checked=False, label_name=name: self.rename_label_by_name(label_name))
 
             delete_btn = QToolButton()
@@ -709,7 +1036,7 @@ class MainWindow(QMainWindow):
             delete_btn.setObjectName("labelIconButton")
             delete_btn.setIcon(delete_icon(size=18))
             delete_btn.setIconSize(QSize(16, 16))
-            delete_btn.setToolTip("Delete label")
+            delete_btn.setToolTip(self._tr("tooltip.delete_label", "Delete label"))
             delete_btn.clicked.connect(lambda checked=False, label_name=name: self.delete_label_by_name(label_name))
 
             row_layout.addWidget(swatch)
@@ -757,14 +1084,18 @@ class MainWindow(QMainWindow):
             return
 
         default_name = self.label_service.make_default_name(item)
-        name, ok = self._get_text_dialog("Create Label", "Label Name", default_name)
+        name, ok = self._get_text_dialog(
+            self._tr("dialog.create_label", "Create Label"),
+            self._tr("dialog.label_name", "Label Name"),
+            default_name,
+        )
         if not ok:
             return
 
         try:
             self.label_service.create_label(item, name, self.current_image_rgb.shape[:2], color=(255, 255, 255))
         except Exception as exc:
-            QMessageBox.warning(self, "Create label failed", str(exc))
+            QMessageBox.warning(self, self._tr("error.create_label_failed", "Create label failed"), str(exc))
             return
 
         self._refresh_labels()
@@ -776,14 +1107,19 @@ class MainWindow(QMainWindow):
         if item is None or self.current_image_rgb is None:
             return
 
-        tar_path, _ = QFileDialog.getOpenFileName(self, "Import .tar Label", str(item.path.parent), "Tar Files (*.tar)")
+        tar_path, _ = QFileDialog.getOpenFileName(
+            self,
+            self._tr("dialog.import_label_tar", "Import label (.tar)"),
+            str(item.path.parent),
+            self._tr("filter.tar_files", "Tar Files (*.tar)"),
+        )
         if not tar_path:
             return
 
         try:
             label = self.label_service.import_tar(item, Path(tar_path), self.current_image_rgb.shape[:2])
         except Exception as exc:
-            QMessageBox.warning(self, "Import label failed", str(exc))
+            QMessageBox.warning(self, self._tr("error.import_label_failed", "Import label failed"), str(exc))
             return
 
         self._refresh_labels()
@@ -797,12 +1133,20 @@ class MainWindow(QMainWindow):
 
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Icon.Question)
-        msg.setWindowTitle("Import from image")
-        msg.setText("How do you want to import this mask image?")
-        msg.setInformativeText("Choose to create a new label or overwrite the current selected label.")
-        new_btn = msg.addButton("Create new label", QMessageBox.ButtonRole.AcceptRole)
-        overwrite_btn = msg.addButton("Overwrite current label", QMessageBox.ButtonRole.DestructiveRole)
-        cancel_btn = msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        msg.setWindowTitle(self._tr("dialog.import_from_image", "Import from image"))
+        msg.setText(self._tr("dialog.import_from_image_question", "How do you want to import this mask image?"))
+        msg.setInformativeText(
+            self._tr(
+                "dialog.import_from_image_info",
+                "Choose to create a new label or overwrite the current selected label.",
+            )
+        )
+        new_btn = msg.addButton(self._tr("btn.create_new_label", "Create new label"), QMessageBox.ButtonRole.AcceptRole)
+        overwrite_btn = msg.addButton(
+            self._tr("btn.overwrite_current_label", "Overwrite current label"),
+            QMessageBox.ButtonRole.DestructiveRole,
+        )
+        cancel_btn = msg.addButton(self._tr("btn.cancel", "Cancel"), QMessageBox.ButtonRole.RejectRole)
         msg.exec()
 
         clicked = msg.clickedButton()
@@ -811,7 +1155,14 @@ class MainWindow(QMainWindow):
         mode = "new" if clicked == new_btn else "overwrite"
 
         if mode == "overwrite" and self.current_label is None:
-            QMessageBox.warning(self, "Import from image", "No label is selected. Select a label first or choose create new label.")
+            QMessageBox.warning(
+                self,
+                self._tr("dialog.import_from_image", "Import from image"),
+                self._tr(
+                    "warn.no_label_selected_for_overwrite",
+                    "No label is selected. Select a label first or choose create new label.",
+                ),
+            )
             return
 
         label_name: str | None = None
@@ -820,22 +1171,30 @@ class MainWindow(QMainWindow):
             default_name = self.label_service.make_default_name(item)
             customize = QMessageBox(self)
             customize.setIcon(QMessageBox.Icon.Question)
-            customize.setWindowTitle("New label options")
-            customize.setText("Customize label name and color before importing?")
-            yes_btn = customize.addButton("Customize", QMessageBox.ButtonRole.AcceptRole)
-            no_btn = customize.addButton("Use defaults", QMessageBox.ButtonRole.NoRole)
-            cancel_customize_btn = customize.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            customize.setWindowTitle(self._tr("dialog.new_label_options", "New label options"))
+            customize.setText(self._tr("dialog.customize_label_before_import", "Customize label name and color before importing?"))
+            yes_btn = customize.addButton(self._tr("btn.customize", "Customize"), QMessageBox.ButtonRole.AcceptRole)
+            no_btn = customize.addButton(self._tr("btn.use_defaults", "Use defaults"), QMessageBox.ButtonRole.NoRole)
+            cancel_customize_btn = customize.addButton(self._tr("btn.cancel", "Cancel"), QMessageBox.ButtonRole.RejectRole)
             customize.exec()
             chosen = customize.clickedButton()
             if chosen == cancel_customize_btn or chosen is None:
                 return
             if chosen == yes_btn:
-                custom_name, ok = self._get_text_dialog("Create Label from Image", "Label Name", default_name)
+                custom_name, ok = self._get_text_dialog(
+                    self._tr("dialog.create_label_from_image", "Create Label from Image"),
+                    self._tr("dialog.label_name", "Label Name"),
+                    default_name,
+                )
                 if not ok:
                     return
                 label_name = custom_name
 
-                color = QColorDialog.getColor(QColor(*label_color), self, "Pick Label Color (Optional)")
+                color = QColorDialog.getColor(
+                    QColor(*label_color),
+                    self,
+                    self._tr("dialog.pick_label_color_optional", "Pick Label Color (Optional)"),
+                )
                 if color.isValid():
                     label_color = (color.red(), color.green(), color.blue())
             elif chosen == no_btn:
@@ -843,9 +1202,9 @@ class MainWindow(QMainWindow):
 
         image_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Import Mask Image",
+            self._tr("dialog.import_mask_image", "Import Mask Image"),
             str(item.path.parent),
-            "Image Files (*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp)",
+            self._tr("filter.image_files", "Image Files (*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp)"),
         )
         if not image_path:
             return
@@ -868,7 +1227,7 @@ class MainWindow(QMainWindow):
                     self.current_image_rgb.shape[:2],
                 )
         except Exception as exc:
-            QMessageBox.warning(self, "Import from image failed", str(exc))
+            QMessageBox.warning(self, self._tr("error.import_from_image_failed", "Import from image failed"), str(exc))
             return
 
         self._refresh_labels()
@@ -879,7 +1238,10 @@ class MainWindow(QMainWindow):
         self.canvas.set_editable(not label.locked)
         self._refresh_file_row(self.current_image_index)
         self._update_status(
-            f"Imported mask image into {label.label_name} (memory only, save to write .tar)"
+            self._tr(
+                "status.imported_mask_memory_only",
+                "Imported mask image into {label_name} (memory only, save to write .tar)",
+            ).format(label_name=label.label_name)
         )
 
     def rename_label(self) -> None:
@@ -888,7 +1250,11 @@ class MainWindow(QMainWindow):
         if label is None or item is None:
             return
 
-        new_name, ok = self._get_text_dialog("Rename Label", "New Name", label.label_name)
+        new_name, ok = self._get_text_dialog(
+            self._tr("dialog.rename_label", "Rename Label"),
+            self._tr("dialog.new_name", "New Name"),
+            label.label_name,
+        )
         if not ok:
             return
 
@@ -896,7 +1262,7 @@ class MainWindow(QMainWindow):
         try:
             self.label_service.rename_label(item, old_name, new_name)
         except Exception as exc:
-            QMessageBox.warning(self, "Rename failed", str(exc))
+            QMessageBox.warning(self, self._tr("error.rename_failed", "Rename failed"), str(exc))
             return
 
         self.current_label_name = new_name
@@ -930,7 +1296,7 @@ class MainWindow(QMainWindow):
         try:
             self.label_service.rename_label(item, old, new_name)
         except Exception as exc:
-            QMessageBox.warning(self, "Rename failed", str(exc))
+            QMessageBox.warning(self, self._tr("error.rename_failed", "Rename failed"), str(exc))
             self.label_name_edit.setText(old)
             return
 
@@ -947,8 +1313,10 @@ class MainWindow(QMainWindow):
 
         ans = QMessageBox.question(
             self,
-            "Delete label",
-            f"Delete label '{label.label_name}' and its .tar file?",
+            self._tr("dialog.delete_label", "Delete label"),
+            self._tr("dialog.delete_label_confirm", "Delete label '{label_name}' and its .tar file?").format(
+                label_name=label.label_name
+            ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if ans != QMessageBox.StandardButton.Yes:
@@ -988,7 +1356,11 @@ class MainWindow(QMainWindow):
             return
         label = item.labels[label_name]
 
-        color = QColorDialog.getColor(QColor(*label.display_color), self, "Pick Label Color")
+        color = QColorDialog.getColor(
+            QColor(*label.display_color),
+            self,
+            self._tr("dialog.pick_label_color", "Pick Label Color"),
+        )
         if not color.isValid():
             return
 
@@ -1031,8 +1403,8 @@ class MainWindow(QMainWindow):
         self.canvas.set_editable(not label.locked)
         self._refresh_labels()
         self._refresh_file_row(self.current_image_index)
-        state = "locked" if label.locked else "unlocked"
-        self._update_status(f"Label {label.label_name} is {state}")
+        state = self._tr("status.locked", "locked") if label.locked else self._tr("status.unlocked", "unlocked")
+        self._update_status(self._tr("status.label_is_state", "Label {label_name} is {state}").format(label_name=label.label_name, state=state))
 
     def toggle_label_lock_by_name(self, label_name: str) -> None:
         item = self.current_image_item
@@ -1043,8 +1415,13 @@ class MainWindow(QMainWindow):
         label.dirty = True
         if self.current_label_name == label_name:
             self.canvas.set_editable(not label.locked)
-            state = "locked" if label.locked else "unlocked"
-            self._update_status(f"Label {label.label_name} is {state}")
+            state = self._tr("status.locked", "locked") if label.locked else self._tr("status.unlocked", "unlocked")
+            self._update_status(
+                self._tr("status.label_is_state", "Label {label_name} is {state}").format(
+                    label_name=label.label_name,
+                    state=state,
+                )
+            )
         self._refresh_labels()
         self.select_label_by_name(label_name)
         self._refresh_file_row(self.current_image_index)
@@ -1096,21 +1473,21 @@ class MainWindow(QMainWindow):
 
     def undo(self) -> None:
         if self.current_label and self.current_label.locked:
-            self._update_status("Current label is locked.")
+            self._update_status(self._tr("status.current_label_locked", "Current label is locked."))
             return
         if self.canvas.undo():
             self._on_canvas_dirty()
 
     def redo(self) -> None:
         if self.current_label and self.current_label.locked:
-            self._update_status("Current label is locked.")
+            self._update_status(self._tr("status.current_label_locked", "Current label is locked."))
             return
         if self.canvas.redo():
             self._on_canvas_dirty()
 
     def clear_current_label(self) -> None:
         if self.current_label and self.current_label.locked:
-            self._update_status("Current label is locked.")
+            self._update_status(self._tr("status.current_label_locked", "Current label is locked."))
             return
         if self.canvas.clear_mask():
             self._on_canvas_dirty()
@@ -1124,12 +1501,12 @@ class MainWindow(QMainWindow):
         try:
             path = self.label_service.save_label(item, label.label_name)
         except Exception as exc:
-            QMessageBox.warning(self, "Save failed", str(exc))
+            QMessageBox.warning(self, self._tr("error.save_failed", "Save failed"), str(exc))
             return
 
         self._refresh_labels()
         self._refresh_file_row(self.current_image_index)
-        self._update_status(f"Saved {path.name}")
+        self._update_status(self._tr("status.saved_file", "Saved {name}").format(name=path.name))
 
     def export_stroke(self) -> None:
         item = self.current_image_item
@@ -1141,9 +1518,9 @@ class MainWindow(QMainWindow):
         default_path = str(item.path.parent / default_name)
         save_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Export Stroke PNG",
+            self._tr("dialog.export_stroke_png", "Export Stroke PNG"),
             default_path,
-            "PNG Files (*.png)",
+            self._tr("filter.png_files", "PNG Files (*.png)"),
         )
         if not save_path:
             return
@@ -1151,10 +1528,10 @@ class MainWindow(QMainWindow):
         try:
             path = self.label_service.export_stroke(item, label.label_name, output_path=Path(save_path))
         except Exception as exc:
-            QMessageBox.warning(self, "Export failed", str(exc))
+            QMessageBox.warning(self, self._tr("error.export_failed", "Export failed"), str(exc))
             return
 
-        self._update_status(f"Exported {path}")
+        self._update_status(self._tr("status.exported_path", "Exported {path}").format(path=path))
 
     def _guard_unsaved_before_switch(self) -> bool:
         item = self.current_image_item
@@ -1167,12 +1544,12 @@ class MainWindow(QMainWindow):
 
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Icon.Warning)
-        msg.setWindowTitle("Unsaved labels")
-        msg.setText("Current image has unsaved label edits.")
-        msg.setInformativeText("Save / Discard / Cancel")
-        save_btn = msg.addButton("Save", QMessageBox.ButtonRole.AcceptRole)
-        discard_btn = msg.addButton("Discard", QMessageBox.ButtonRole.DestructiveRole)
-        cancel_btn = msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        msg.setWindowTitle(self._tr("dialog.unsaved_labels", "Unsaved labels"))
+        msg.setText(self._tr("dialog.unsaved_edits", "Current image has unsaved label edits."))
+        msg.setInformativeText(self._tr("dialog.save_discard_cancel", "Save / Discard / Cancel"))
+        save_btn = msg.addButton(self._tr("btn.save", "Save"), QMessageBox.ButtonRole.AcceptRole)
+        discard_btn = msg.addButton(self._tr("btn.discard", "Discard"), QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = msg.addButton(self._tr("btn.cancel", "Cancel"), QMessageBox.ButtonRole.RejectRole)
         msg.exec()
 
         clicked = msg.clickedButton()
@@ -1183,7 +1560,7 @@ class MainWindow(QMainWindow):
                 try:
                     self.label_service.save_label(item, label.label_name)
                 except Exception as exc:
-                    QMessageBox.warning(self, "Save failed", str(exc))
+                    QMessageBox.warning(self, self._tr("error.save_failed", "Save failed"), str(exc))
                     return False
         if clicked == discard_btn:
             for label in dirty_labels:
@@ -1235,15 +1612,33 @@ class MainWindow(QMainWindow):
         brush = f"{self.canvas.brush_size:.1f}px"
         opacity = f"{self.canvas.get_overlay_opacity():.0f}%"
         lname = label.label_name if label else "-"
-        save_state = "dirty" if label and label.dirty else "saved"
+        save_state = self._tr("status.dirty", "dirty") if label and label.dirty else self._tr("status.saved", "saved")
         if label is None:
-            lock_state = "no-label"
+            lock_state = self._tr("status.no_label", "no-label")
         else:
-            lock_state = "locked" if label.locked else "editable"
+            lock_state = self._tr("status.locked", "locked") if label.locked else self._tr("status.editable", "editable")
         tool = self.canvas.current_tool
+        tool_text = (
+            self._tr("tool.brush", "brush")
+            if tool == "brush"
+            else self._tr("tool.eraser", "eraser")
+            if tool == "eraser"
+            else tool
+        )
         base = (
-            f"File: {fname} | Zoom: {zoom} | Brush: {brush} | Tool: {tool} | "
-            f"Label: {lname} | Opacity: {opacity} | {lock_state} | {save_state}"
+            self._tr(
+                "status.base",
+                "File: {fname} | Zoom: {zoom} | Brush: {brush} | Tool: {tool} | Label: {lname} | Opacity: {opacity} | {lock_state} | {save_state}",
+            ).format(
+                fname=fname,
+                zoom=zoom,
+                brush=brush,
+                tool=tool_text,
+                lname=lname,
+                opacity=opacity,
+                lock_state=lock_state,
+                save_state=save_state,
+            )
         )
 
         if message:

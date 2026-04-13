@@ -66,6 +66,7 @@ class CanvasWidget(QWidget):
 
         self.pan_active = False
         self.drag_anchor = QPoint()
+        self.empty_hint_text = "Open Folder to start annotation\n\nB: Brush  E: Eraser  A: Toggle Overlay"
         self._sync_cursor()
 
     def has_content(self) -> bool:
@@ -131,6 +132,11 @@ class CanvasWidget(QWidget):
     def set_overlay_visible(self, visible: bool) -> None:
         self.overlay_visible = visible
         self.update()
+
+    def set_empty_hint_text(self, text: str) -> None:
+        self.empty_hint_text = text
+        if self.image_rgb is None:
+            self.update()
 
     def set_overlay_opacity(self, percent: float) -> None:
         p = max(0.0, min(100.0, float(percent)))
@@ -241,7 +247,7 @@ class CanvasWidget(QWidget):
             p.drawText(
                 self.rect(),
                 Qt.AlignmentFlag.AlignCenter,
-                "Open Folder to start annotation\n\nB: Brush  E: Eraser  A: Toggle Overlay",
+                self.empty_hint_text,
             )
             return
 
