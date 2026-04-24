@@ -89,3 +89,31 @@ spec.md      # 产品与技术规范
 
 ## License
 GPL-3.0. See [LICENSE](LICENSE).
+
+## 运行
+
+### Windows 用户
+1. 安装 Python 3.10+（安装时勾选 `Add python.exe to PATH`）。
+2. 打开 `cmd` 或 PowerShell，进入项目根目录（和 `main.py` 同级）。
+3. 执行：
+```bat
+python -m pip install -r requirements.txt
+python main.py
+```
+
+### macOS 用户
+1. 确保已安装 Python 3.10+。
+2. 打开终端，进入项目根目录（和 `main.py` 同级）。
+3. 执行：
+```bash
+python3 -m pip install -r requirements.txt
+python3 main.py
+```
+
+### 常见问题
+1. `python` / `python3` 不存在：先安装 Python，再重开终端。
+2. 依赖安装报权限错误：使用
+```bash
+python3 -m pip install --user -r requirements.txt
+```
+3. 程序启动失败：先确认你当前目录下有 `main.py`。
