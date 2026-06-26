@@ -19,4 +19,7 @@ dependencies = [
 vesselme = "vesselme.main:run"
 
 [tool.setuptools]
-packages = ["vesselme", "vesselme.ui", "vesselme.core", "vesselme.data", "vesselme.services", "vesselme.utils"]
+py-modules = ["bunch"]
+
+[tool.setuptools.packages.find]
+include = ["vesselme*"]

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QObject, QThread, Signal, QSize, Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -37,10 +38,54 @@ from PySide6.QtWidgets import (
 )
 
 from vesselme.data.models import ImageItem
+from vesselme.services.auto_segment_service import AutoSegmentService
 from vesselme.services.label_service import LabelService
+from vesselme.services.model_runtime_manager import ModelRuntimeManager
 from vesselme.services.project_service import ProjectService
 from vesselme.ui.canvas_widget import CanvasWidget
 from vesselme.ui.icons import delete_icon, eye_icon, lock_icon, rename_icon
+
+
+class InstallFrUnetWorker(QObject):
+    """在后台线程执行 FR-UNet 一键安装，避免阻塞 Qt 主线程。"""
+
+    finished = Signal(bool, str)
+
+    def __init__(self, runtime_manager: ModelRuntimeManager) -> None:
+        super().__init__()
+        self.runtime_manager = runtime_manager
+
+    def run(self) -> None:
+        try:
+            result = self.runtime_manager.install()
+            log = "\n".join(part for part in [result.stdout, result.stderr] if part)
+            self.finished.emit(True, log.strip())
+        except subprocess.CalledProcessError as exc:
+            log = "\n".join(part for part in [exc.stdout, exc.stderr, str(exc)] if part)
+            self.finished.emit(False, log.strip())
+        except Exception as exc:
+            self.finished.emit(False, str(exc))
+
+
+class AutoSegmentWorker(QObject):
+    """在后台线程执行 FR-UNet 自动分割，完成后把 mask 交回主线程。"""
+
+    finished = Signal(bool, object, str)
+
+    def __init__(self, service: AutoSegmentService, image_path: Path) -> None:
+        super().__init__()
+        self.service = service
+        self.image_path = image_path
+
+    def run(self) -> None:
+        try:
+            mask = self.service.predict_mask(self.image_path)
+            self.finished.emit(True, mask, "")
+        except subprocess.CalledProcessError as exc:
+            log = "\n".join(part for part in [exc.stdout, exc.stderr, str(exc)] if part)
+            self.finished.emit(False, None, log.strip())
+        except Exception as exc:
+            self.finished.emit(False, None, str(exc))
 
 
 class MainWindow(QMainWindow):
@@ -53,11 +98,17 @@ class MainWindow(QMainWindow):
 
         self.project_service = ProjectService()
         self.label_service = LabelService()
+        self.runtime_manager = ModelRuntimeManager()
+        self.auto_segment_service = AutoSegmentService(self.runtime_manager)
 
         self.images: list[ImageItem] = []
         self.current_image_index = -1
         self.current_label_name: str | None = None
         self.current_image_rgb: np.ndarray | None = None
+        self._install_thread: QThread | None = None
+        self._install_worker: InstallFrUnetWorker | None = None
+        self._segment_thread: QThread | None = None
+        self._segment_worker: AutoSegmentWorker | None = None
 
         self.setProperty("space_pressed", False)
         self._build_ui()
@@ -158,6 +209,15 @@ class MainWindow(QMainWindow):
         row1.addWidget(self.btn_new_label)
         row1.addWidget(self.btn_import)
 
+        row_ai = QHBoxLayout()
+        self.btn_install_fr_unet = QPushButton("Install FR-UNet")
+        self.btn_install_fr_unet.clicked.connect(self.install_fr_unet)
+        self.btn_auto_segment = QPushButton("Auto Segment")
+        self.btn_auto_segment.setObjectName("primary")
+        self.btn_auto_segment.clicked.connect(self.auto_segment_current_image)
+        row_ai.addWidget(self.btn_install_fr_unet)
+        row_ai.addWidget(self.btn_auto_segment)
+
         row4 = QHBoxLayout()
         self.btn_save = QPushButton("Save (Ctrl+S)")
         self.btn_save.setObjectName("primary")
@@ -173,13 +233,13 @@ class MainWindow(QMainWindow):
 
         brush_row = QHBoxLayout()
         self.brush_size_slider = QSlider(Qt.Orientation.Horizontal)
-        self.brush_size_slider.setRange(1, 100)  # 0.5px to 50.0px, step 0.5
+        self.brush_size_slider.setRange(1, 1000)  # 0.5px to 500.0px, step 0.5
         self.brush_size_slider.setSingleStep(1)
         self.brush_size_slider.setPageStep(2)
         self.brush_size_slider.setValue(int(round(self.canvas.brush_size * 2)))
         self.brush_size_slider.valueChanged.connect(self._on_brush_slider_changed)
         self.brush_size_spin = QDoubleSpinBox()
-        self.brush_size_spin.setRange(0.5, 50.0)
+        self.brush_size_spin.setRange(0.5, 500.0)
         self.brush_size_spin.setSingleStep(0.5)
         self.brush_size_spin.setDecimals(1)
         self.brush_size_spin.setValue(self.canvas.brush_size)
@@ -202,6 +262,7 @@ class MainWindow(QMainWindow):
         label_layout.addWidget(self.label_title)
         label_layout.addWidget(self.label_list, 1)
         label_layout.addLayout(row1)
+        label_layout.addLayout(row_ai)
         self.brush_size_title = QLabel("Brush size")
         label_layout.addWidget(self.brush_size_title)
         label_layout.addLayout(brush_row)
@@ -255,6 +316,16 @@ class MainWindow(QMainWindow):
         self.toolbar_import_image_action.setToolTip("Import a mask image, binarize it, and attach it to a label.")
         self.toolbar_import_image_action.triggered.connect(self.import_label_from_image)
         main_toolbar.addAction(self.toolbar_import_image_action)
+
+        self.toolbar_install_fr_unet_action = QAction("Install FR-UNet", self)
+        self.toolbar_install_fr_unet_action.setToolTip("Install the independent FR-UNet runtime and official DRIVE weights.")
+        self.toolbar_install_fr_unet_action.triggered.connect(self.install_fr_unet)
+        main_toolbar.addAction(self.toolbar_install_fr_unet_action)
+
+        self.toolbar_auto_segment_action = QAction("Auto Segment", self)
+        self.toolbar_auto_segment_action.setToolTip("Run FR-UNet and create an editable auto_vessel label.")
+        self.toolbar_auto_segment_action.triggered.connect(self.auto_segment_current_image)
+        main_toolbar.addAction(self.toolbar_auto_segment_action)
 
         self.toolbar_export_action = QAction("Export PNG", self)
         self.toolbar_export_action.setToolTip("Export the current label as a black-background PNG preview.")
@@ -509,6 +580,14 @@ class MainWindow(QMainWindow):
         self.menu_import_image_action.triggered.connect(self.import_label_from_image)
         self.file_menu.addAction(self.menu_import_image_action)
 
+        self.menu_install_fr_unet_action = QAction("Install FR-UNet", self)
+        self.menu_install_fr_unet_action.triggered.connect(self.install_fr_unet)
+        self.file_menu.addAction(self.menu_install_fr_unet_action)
+
+        self.menu_auto_segment_action = QAction("Auto Segment", self)
+        self.menu_auto_segment_action.triggered.connect(self.auto_segment_current_image)
+        self.file_menu.addAction(self.menu_auto_segment_action)
+
         self.menu_export_action = QAction("Export Stroke PNG", self)
         self.menu_export_action.triggered.connect(self.export_stroke)
         self.file_menu.addAction(self.menu_export_action)
@@ -584,6 +663,8 @@ class MainWindow(QMainWindow):
         self.btn_open_folder.setText(self._tr("btn.open_folder", "Open Folder"))
         self.btn_new_label.setText(self._tr("btn.new", "New"))
         self.btn_import.setText(self._tr("btn.import_label_tar", "Import label (.tar)"))
+        self.btn_install_fr_unet.setText(self._tr("btn.install_fr_unet", "Install FR-UNet"))
+        self.btn_auto_segment.setText(self._tr("btn.auto_segment", "Auto Segment"))
         self.btn_save.setText(self._tr("btn.save_ctrl_s", "Save (Ctrl+S)"))
         self.btn_export.setText(self._tr("btn.export_stroke_png", "Export Stroke PNG"))
         self.label_name_edit.setPlaceholderText(self._tr("placeholder.selected_label_name", "Selected label name"))
@@ -618,6 +699,17 @@ class MainWindow(QMainWindow):
         self.toolbar_import_image_action.setToolTip(
             self._tr("tooltip.toolbar_import_image", "Import a mask image, binarize it, and attach it to a label.")
         )
+        self.toolbar_install_fr_unet_action.setText(self._tr("toolbar.install_fr_unet", "Install FR-UNet"))
+        self.toolbar_install_fr_unet_action.setToolTip(
+            self._tr(
+                "tooltip.toolbar_install_fr_unet",
+                "Install the independent FR-UNet runtime and official DRIVE weights.",
+            )
+        )
+        self.toolbar_auto_segment_action.setText(self._tr("toolbar.auto_segment", "Auto Segment"))
+        self.toolbar_auto_segment_action.setToolTip(
+            self._tr("tooltip.toolbar_auto_segment", "Run FR-UNet and create an editable auto_vessel label.")
+        )
         self.toolbar_export_action.setText(self._tr("toolbar.export_png", "Export PNG"))
         self.toolbar_export_action.setToolTip(
             self._tr("tooltip.toolbar_export_png", "Export the current label as a black-background PNG preview.")
@@ -651,6 +743,8 @@ class MainWindow(QMainWindow):
         self.menu_save_action.setText(self._tr("menu.save_current_label", "Save Current Label"))
         self.menu_import_action.setText(self._tr("menu.import_label_tar", "Import Label Tar"))
         self.menu_import_image_action.setText(self._tr("menu.import_label_from_image", "Import Label from Image"))
+        self.menu_install_fr_unet_action.setText(self._tr("menu.install_fr_unet", "Install FR-UNet"))
+        self.menu_auto_segment_action.setText(self._tr("menu.auto_segment", "Auto Segment"))
         self.menu_export_action.setText(self._tr("menu.export_stroke_png", "Export Stroke PNG"))
         self.menu_prev_action.setText(self._tr("menu.previous_image", "Previous Image"))
         self.menu_next_action.setText(self._tr("menu.next_image", "Next Image"))
@@ -1244,6 +1338,144 @@ class MainWindow(QMainWindow):
             ).format(label_name=label.label_name)
         )
 
+    def install_fr_unet(self) -> None:
+        """从 UI 触发 FR-UNet 独立运行时安装。"""
+
+        if self._install_thread is not None:
+            return
+        self._set_ai_buttons_enabled(False)
+        self._update_status(self._tr("status.fr_unet_installing", "Installing FR-UNet runtime..."))
+
+        self._install_thread = QThread(self)
+        self._install_worker = InstallFrUnetWorker(self.runtime_manager)
+        self._install_worker.moveToThread(self._install_thread)
+        self._install_thread.started.connect(self._install_worker.run)
+        self._install_worker.finished.connect(self._on_fr_unet_install_finished)
+        self._install_worker.finished.connect(self._install_thread.quit)
+        self._install_worker.finished.connect(self._install_worker.deleteLater)
+        self._install_thread.finished.connect(self._install_thread.deleteLater)
+        self._install_thread.finished.connect(self._clear_install_worker)
+        self._install_thread.start()
+
+    def _on_fr_unet_install_finished(self, ok: bool, log: str) -> None:
+        self._set_ai_buttons_enabled(True)
+        if ok:
+            self._update_status(self._tr("status.fr_unet_ready", "FR-UNet is ready."))
+            QMessageBox.information(
+                self,
+                self._tr("dialog.fr_unet_install", "Install FR-UNet"),
+                self._tr("status.fr_unet_ready", "FR-UNet is ready."),
+            )
+            return
+        QMessageBox.critical(
+            self,
+            self._tr("error.fr_unet_install_failed", "FR-UNet install failed"),
+            log or self._tr("error.unknown_error", "Unknown error"),
+        )
+        self._update_status(self._tr("error.fr_unet_install_failed", "FR-UNet install failed"))
+
+    def _clear_install_worker(self) -> None:
+        self._install_thread = None
+        self._install_worker = None
+
+    def auto_segment_current_image(self) -> None:
+        """对当前图像执行 FR-UNet 自动分割，生成并保存 auto_vessel 标签。"""
+
+        item = self.current_image_item
+        if item is None or self.current_image_rgb is None:
+            return
+        if self._segment_thread is not None:
+            return
+        if not self.runtime_manager.status().ready:
+            QMessageBox.warning(
+                self,
+                self._tr("dialog.auto_segment", "Auto Segment"),
+                self._tr("warn.fr_unet_not_ready", "FR-UNet is not installed. Click Install FR-UNet first."),
+            )
+            return
+
+        overwrite = False
+        if "auto_vessel" in item.labels:
+            ans = QMessageBox.question(
+                self,
+                self._tr("dialog.auto_segment", "Auto Segment"),
+                self._tr("dialog.overwrite_auto_vessel", "Label auto_vessel already exists. Overwrite it?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+            overwrite = True
+        self._pending_auto_segment_overwrite = overwrite
+
+        self._set_ai_buttons_enabled(False)
+        self._update_status(self._tr("status.auto_segment_running", "Running FR-UNet auto segmentation..."))
+
+        self._segment_thread = QThread(self)
+        self._segment_worker = AutoSegmentWorker(self.auto_segment_service, item.path)
+        self._segment_worker.moveToThread(self._segment_thread)
+        self._segment_thread.started.connect(self._segment_worker.run)
+        self._segment_worker.finished.connect(self._on_auto_segment_finished)
+        self._segment_worker.finished.connect(self._segment_thread.quit)
+        self._segment_worker.finished.connect(self._segment_worker.deleteLater)
+        self._segment_thread.finished.connect(self._segment_thread.deleteLater)
+        self._segment_thread.finished.connect(self._clear_segment_worker)
+        self._segment_thread.start()
+
+    def _on_auto_segment_finished(self, ok: bool, mask_obj: object, log: str) -> None:
+        self._set_ai_buttons_enabled(True)
+        item = self.current_image_item
+        if not ok:
+            QMessageBox.critical(
+                self,
+                self._tr("error.auto_segment_failed", "Auto segment failed"),
+                log or self._tr("error.unknown_error", "Unknown error"),
+            )
+            self._update_status(self._tr("error.auto_segment_failed", "Auto segment failed"))
+            return
+        if item is None or self.current_image_rgb is None or not isinstance(mask_obj, np.ndarray):
+            QMessageBox.critical(
+                self,
+                self._tr("error.auto_segment_failed", "Auto segment failed"),
+                self._tr("error.image_context_changed", "Current image changed before segmentation finished."),
+            )
+            return
+
+        try:
+            label = self.auto_segment_service.create_or_overwrite_label(
+                item,
+                mask_obj,
+                label_name="auto_vessel",
+                color=(255, 255, 255),
+                overwrite=getattr(self, "_pending_auto_segment_overwrite", False),
+            )
+            path = self.auto_segment_service.save_label_tar(item, label)
+        except Exception as exc:
+            QMessageBox.critical(self, self._tr("error.auto_segment_failed", "Auto segment failed"), str(exc))
+            return
+
+        self._refresh_labels()
+        self.select_label_by_name(label.label_name)
+        label.ensure_mask(self.current_image_rgb.shape[:2])
+        self.canvas.set_scene(self.current_image_rgb, label.mask, label.display_color, preserve_view=True)
+        self.canvas.set_overlay_visible(label.visible)
+        self.canvas.set_editable(not label.locked)
+        self._refresh_file_row(self.current_image_index)
+        self._update_status(self._tr("status.auto_segment_saved", "Auto segmentation saved {name}").format(name=path.name))
+
+    def _clear_segment_worker(self) -> None:
+        self._segment_thread = None
+        self._segment_worker = None
+
+    def _set_ai_buttons_enabled(self, enabled: bool) -> None:
+        """统一控制 AI 相关按钮状态，防止重复安装或重复推理。"""
+
+        self.btn_install_fr_unet.setEnabled(enabled)
+        self.btn_auto_segment.setEnabled(enabled)
+        self.toolbar_install_fr_unet_action.setEnabled(enabled)
+        self.toolbar_auto_segment_action.setEnabled(enabled)
+        self.menu_install_fr_unet_action.setEnabled(enabled)
+        self.menu_auto_segment_action.setEnabled(enabled)
+
     def rename_label(self) -> None:
         label = self.current_label
         item = self.current_image_item
@@ -1432,7 +1664,7 @@ class MainWindow(QMainWindow):
         self._update_status()
 
     def _set_brush(self, size: float) -> None:
-        value = max(0.5, min(50.0, float(size)))
+        value = max(0.5, min(500.0, float(size)))
         self.canvas.set_brush_size(value)
         self.brush_size_slider.blockSignals(True)
         self.brush_size_slider.setValue(int(round(self.canvas.brush_size * 2)))

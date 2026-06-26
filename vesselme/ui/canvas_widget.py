@@ -118,7 +118,7 @@ class CanvasWidget(QWidget):
         self._sync_cursor()
 
     def set_brush_size(self, size: float) -> None:
-        value = max(0.5, min(50.0, round(float(size) * 2.0) / 2.0))
+        value = max(0.5, min(500.0, round(float(size) * 2.0) / 2.0))
         if abs(value - self.brush_size) < 1e-6:
             return
         self.brush_size = value
