@@ -45,13 +45,14 @@ class LabelService:
         return label
 
     def import_tar(self, image_item: ImageItem, tar_path: Path, mask_shape: tuple[int, int]) -> LabelData:
-        label = read_label_tar(tar_path, expected_image_name=image_item.name)
+        label = read_label_tar(tar_path)
         if label.mask is None:
             raise ValueError("Imported mask is empty")
         if label.mask.shape != mask_shape:
             raise ValueError(
                 f"Imported mask shape mismatch: expected {mask_shape}, got {label.mask.shape}"
             )
+        label.image_name = image_item.name
 
         candidate = label.label_name
         if candidate in image_item.labels:

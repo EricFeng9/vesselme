@@ -8,7 +8,7 @@ import numpy as np
 
 from vesselme.data.io import build_tar_name, write_label_tar
 from vesselme.data.models import ImageItem, LabelData, normalize_mask
-from vesselme.ai_backends.fr_unet.classical_vessel import segment_clarus_vessels
+from vesselme.ai_backends.fr_unet.classical_vessel import AutoSegmentCanceled, segment_clarus_vessels
 from vesselme.services.model_runtime_manager import ModelRuntimeManager
 
 
@@ -22,6 +22,7 @@ class AutoSegmentService:
         self,
         image_path: Path,
         *,
+        cancel_event=None,
         device: str = "auto",
         patch_size: int = 512,
         stride: int = 256,
@@ -34,7 +35,7 @@ class AutoSegmentService:
         继续默认使用会生成非血管散点，违背预标注目标。
         """
 
-        return normalize_mask(segment_clarus_vessels(image_path))
+        return normalize_mask(segment_clarus_vessels(image_path, cancel_event=cancel_event))
 
     def predict_mask_with_fr_unet(
         self,

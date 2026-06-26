@@ -6,7 +6,18 @@ import cv2
 import numpy as np
 
 
-def segment_clarus_vessels(image_path: Path, percentile: float = 97.0) -> np.ndarray:
+class AutoSegmentCanceled(RuntimeError):
+    """用户取消自动分割任务。"""
+
+
+def _check_canceled(cancel_event) -> None:
+    """在耗时循环中检查取消标志，让运行中任务能尽快停止。"""
+
+    if cancel_event is not None and cancel_event.is_set():
+        raise AutoSegmentCanceled("Auto segmentation canceled")
+
+
+def segment_clarus_vessels(image_path: Path, percentile: float = 97.0, cancel_event=None) -> np.ndarray:
     """针对超广角眼底图的传统血管增强预标注。
 
     FR-UNet 官方 DRIVE 权重在 Clarus 超广角/拼接图上会严重域外失效。
@@ -16,6 +27,7 @@ def segment_clarus_vessels(image_path: Path, percentile: float = 97.0) -> np.nda
     image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
         raise RuntimeError(f"Failed to read image: {image_path}")
+    _check_canceled(cancel_event)
 
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     valid = np.zeros_like(gray, dtype=np.uint8)
@@ -28,6 +40,7 @@ def segment_clarus_vessels(image_path: Path, percentile: float = 97.0) -> np.nda
 
     response = np.zeros_like(enhanced, dtype=np.float32)
     for kernel_size in (9, 13, 17, 21, 27):
+        _check_canceled(cancel_event)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
         blackhat = cv2.morphologyEx(enhanced, cv2.MORPH_BLACKHAT, kernel)
         response = np.maximum(response, blackhat.astype(np.float32))
@@ -35,6 +48,7 @@ def segment_clarus_vessels(image_path: Path, percentile: float = 97.0) -> np.nda
     for length in (17, 25, 33):
         center = length // 2
         for angle in range(0, 180, 15):
+            _check_canceled(cancel_event)
             kernel = np.zeros((length, length), dtype=np.uint8)
             radians = np.deg2rad(angle)
             dx = int(np.cos(radians) * center)
@@ -56,6 +70,8 @@ def segment_clarus_vessels(image_path: Path, percentile: float = 97.0) -> np.nda
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     cleaned = np.zeros_like(mask, dtype=np.uint8)
     for label_id in range(1, num_labels):
+        if label_id % 100 == 0:
+            _check_canceled(cancel_event)
         area = stats[label_id, cv2.CC_STAT_AREA]
         if area >= 25:
             cleaned[labels == label_id] = 255

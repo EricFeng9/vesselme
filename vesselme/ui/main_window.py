@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import itertools
 import json
 import subprocess
+import threading
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +32,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStatusBar,
     QSlider,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QToolBar,
@@ -39,6 +44,7 @@ from PySide6.QtWidgets import (
 
 from vesselme.data.models import ImageItem
 from vesselme.services.auto_segment_service import AutoSegmentService
+from vesselme.ai_backends.fr_unet.classical_vessel import AutoSegmentCanceled
 from vesselme.services.label_service import LabelService
 from vesselme.services.model_runtime_manager import ModelRuntimeManager
 from vesselme.services.project_service import ProjectService
@@ -68,24 +74,51 @@ class InstallFrUnetWorker(QObject):
 
 
 class AutoSegmentWorker(QObject):
-    """在后台线程执行 FR-UNet 自动分割，完成后把 mask 交回主线程。"""
+    """在后台线程执行自动分割任务，完成后把结果交回主线程。"""
 
-    finished = Signal(bool, object, str)
+    finished = Signal(int, str, object, str)
 
-    def __init__(self, service: AutoSegmentService, image_path: Path) -> None:
+    def __init__(
+        self,
+        service: AutoSegmentService,
+        task_id: int,
+        image_path: Path,
+        cancel_event: threading.Event,
+    ) -> None:
         super().__init__()
         self.service = service
+        self.task_id = task_id
         self.image_path = image_path
+        self.cancel_event = cancel_event
 
     def run(self) -> None:
         try:
-            mask = self.service.predict_mask(self.image_path)
-            self.finished.emit(True, mask, "")
+            mask = self.service.predict_mask(self.image_path, cancel_event=self.cancel_event)
+            self.finished.emit(self.task_id, "done", mask, "")
+        except AutoSegmentCanceled:
+            self.finished.emit(self.task_id, "canceled", None, "")
         except subprocess.CalledProcessError as exc:
             log = "\n".join(part for part in [exc.stdout, exc.stderr, str(exc)] if part)
-            self.finished.emit(False, None, log.strip())
+            self.finished.emit(self.task_id, "failed", None, log.strip())
         except Exception as exc:
-            self.finished.emit(False, None, str(exc))
+            self.finished.emit(self.task_id, "failed", None, str(exc))
+
+
+@dataclass
+class AutoSegmentTask:
+    """UI 任务队列中的自动分割任务。"""
+
+    task_id: int
+    image_item: ImageItem
+    status: str = "queued"
+    error: str = ""
+    created_at: datetime = field(default_factory=datetime.now)
+    started_at: datetime | None = None
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+
+    @property
+    def image_path(self) -> Path:
+        return self.image_item.path
 
 
 class MainWindow(QMainWindow):
@@ -109,6 +142,9 @@ class MainWindow(QMainWindow):
         self._install_worker: InstallFrUnetWorker | None = None
         self._segment_thread: QThread | None = None
         self._segment_worker: AutoSegmentWorker | None = None
+        self._task_id_counter = itertools.count(1)
+        self.auto_segment_tasks: list[AutoSegmentTask] = []
+        self.current_auto_segment_task_id: int | None = None
 
         self.setProperty("space_pressed", False)
         self._build_ui()
@@ -200,6 +236,7 @@ class MainWindow(QMainWindow):
         self.label_title.setProperty("sectionTitle", True)
         self.label_list = QListWidget()
         self.label_list.currentItemChanged.connect(self._on_label_selected_item)
+        self.task_list = QListWidget()
 
         row1 = QHBoxLayout()
         self.btn_new_label = QPushButton("New")
@@ -259,8 +296,21 @@ class MainWindow(QMainWindow):
         opacity_row.addWidget(self.opacity_slider, 1)
         opacity_row.addWidget(self.opacity_value_label)
 
-        label_layout.addWidget(self.label_title)
-        label_layout.addWidget(self.label_list, 1)
+        self.side_tabs = QTabWidget()
+        self.labels_tab = QWidget()
+        labels_tab_layout = QVBoxLayout(self.labels_tab)
+        labels_tab_layout.setContentsMargins(0, 0, 0, 0)
+        labels_tab_layout.addWidget(self.label_list)
+
+        self.tasks_tab = QWidget()
+        tasks_tab_layout = QVBoxLayout(self.tasks_tab)
+        tasks_tab_layout.setContentsMargins(0, 0, 0, 0)
+        tasks_tab_layout.addWidget(self.task_list)
+
+        self.side_tabs.addTab(self.labels_tab, "Labels")
+        self.side_tabs.addTab(self.tasks_tab, "Tasks")
+
+        label_layout.addWidget(self.side_tabs, 1)
         label_layout.addLayout(row1)
         label_layout.addLayout(row_ai)
         self.brush_size_title = QLabel("Brush size")
@@ -659,7 +709,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(self._tr("window.title", "VesselMe - Fundus Vessel Annotation"))
         self.file_title.setText(self._tr("panel.project_files", "Project Files"))
         self.canvas_title.setText(self._tr("panel.canvas", "Canvas"))
-        self.label_title.setText(self._tr("panel.labels", "Labels"))
+        self.side_tabs.setTabText(0, self._tr("panel.labels", "Labels"))
+        self.side_tabs.setTabText(1, self._tr("panel.tasks", "Tasks"))
         self.btn_open_folder.setText(self._tr("btn.open_folder", "Open Folder"))
         self.btn_new_label.setText(self._tr("btn.new", "New"))
         self.btn_import.setText(self._tr("btn.import_label_tar", "Import label (.tar)"))
@@ -926,6 +977,12 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, self._tr("error.open_folder_failed", "Open folder failed"), str(exc))
             return
 
+        for task in self.auto_segment_tasks:
+            if task.status in {"queued", "running", "canceling"}:
+                task.cancel_event.set()
+        self.auto_segment_tasks.clear()
+        self._refresh_tasks()
+
         self.folder_label.setText(f"{self._tr('label.folder', 'Folder')}: {path}")
         self._populate_file_list()
 
@@ -1140,6 +1197,71 @@ class MainWindow(QMainWindow):
             row_layout.addWidget(rename_btn)
             row_layout.addWidget(delete_btn)
             self.label_list.setItemWidget(row, row_widget)
+
+    def _refresh_tasks(self) -> None:
+        """刷新 Tasks 标签页中的自动分割任务列表。"""
+
+        self.task_list.clear()
+        queued_ids = [task.task_id for task in self.auto_segment_tasks if task.status == "queued"]
+        for task in self.auto_segment_tasks:
+            row = QListWidgetItem()
+            row.setSizeHint(QSize(0, 76))
+            self.task_list.addItem(row)
+
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(6, 4, 6, 4)
+            row_layout.setSpacing(8)
+
+            text_col = QVBoxLayout()
+            text_col.setContentsMargins(0, 0, 0, 0)
+            text_col.setSpacing(3)
+
+            name_label = QLabel(task.image_item.name)
+            name_label.setStyleSheet("font-weight: 600; color: #102a43;")
+
+            status_text = self._task_status_text(task, queued_ids)
+            status_label = QLabel(status_text)
+            status_label.setProperty("muted", True)
+
+            text_col.addWidget(name_label)
+            text_col.addWidget(status_label)
+            if task.status == "failed" and task.error:
+                error_label = QLabel(task.error[:160])
+                error_label.setWordWrap(True)
+                error_label.setStyleSheet("color: #b42318; font-size: 12px;")
+                text_col.addWidget(error_label)
+
+            action_btn = QToolButton()
+            action_btn.setObjectName("labelIconButton")
+            if task.status in {"queued", "running", "canceling"}:
+                action_btn.setText("×")
+                action_btn.setToolTip(self._tr("btn.cancel", "Cancel"))
+                action_btn.clicked.connect(lambda checked=False, tid=task.task_id: self.cancel_auto_segment_task(tid))
+                action_btn.setEnabled(task.status != "canceling")
+            else:
+                action_btn.setIcon(delete_icon(size=18))
+                action_btn.setIconSize(QSize(16, 16))
+                action_btn.setToolTip(self._tr("btn.delete", "Delete"))
+                action_btn.clicked.connect(lambda checked=False, tid=task.task_id: self.delete_auto_segment_task(tid))
+
+            row_layout.addLayout(text_col, 1)
+            row_layout.addWidget(action_btn)
+            self.task_list.setItemWidget(row, row_widget)
+
+    def _task_status_text(self, task: AutoSegmentTask, queued_ids: list[int]) -> str:
+        """生成任务状态文本，排队任务显示队列序号。"""
+
+        if task.status == "queued":
+            position = queued_ids.index(task.task_id) + 1
+            return self._tr("task.status.queued", "Queued #{position}").format(position=position)
+        if task.status == "running":
+            return self._tr("task.status.running", "Running")
+        if task.status == "canceling":
+            return self._tr("task.status.canceling", "Canceling")
+        if task.status == "failed":
+            return self._tr("task.status.failed", "Failed")
+        return task.status
 
     @property
     def current_image_item(self) -> ImageItem | None:
@@ -1379,102 +1501,164 @@ class MainWindow(QMainWindow):
         self._install_worker = None
 
     def auto_segment_current_image(self) -> None:
-        """对当前图像执行 FR-UNet 自动分割，生成并保存 auto_vessel 标签。"""
+        """把当前图像加入自动分割任务队列。"""
 
         item = self.current_image_item
         if item is None or self.current_image_rgb is None:
             return
+        existing = self._find_active_auto_segment_task(item.path)
+        if existing is not None:
+            QMessageBox.information(
+                self,
+                self._tr("dialog.auto_segment", "Auto Segment"),
+                self._tr("warn.auto_segment_task_exists", "This image already has an auto segment task."),
+            )
+            return
+
+        task = AutoSegmentTask(task_id=next(self._task_id_counter), image_item=item)
+        self.auto_segment_tasks.append(task)
+        self.side_tabs.setCurrentWidget(self.tasks_tab)
+        self._refresh_tasks()
+        self._update_status(
+            self._tr(
+                "status.auto_segment_task_queued",
+                "Auto segmentation task queued: {name}",
+            ).format(name=item.name)
+        )
+        self._start_next_auto_segment_task()
+
+    def _find_active_auto_segment_task(self, image_path: Path) -> AutoSegmentTask | None:
+        target = image_path.resolve()
+        for task in self.auto_segment_tasks:
+            if task.image_path.resolve() == target and task.status in {"queued", "running", "canceling"}:
+                return task
+        return None
+
+    def _start_next_auto_segment_task(self) -> None:
+        """如果当前没有运行任务，就启动队列中的下一个任务。"""
+
         if self._segment_thread is not None:
             return
-        if not self.runtime_manager.status().ready:
-            QMessageBox.warning(
-                self,
-                self._tr("dialog.auto_segment", "Auto Segment"),
-                self._tr("warn.fr_unet_not_ready", "FR-UNet is not installed. Click Install FR-UNet first."),
-            )
+        next_task = next((task for task in self.auto_segment_tasks if task.status == "queued"), None)
+        if next_task is None:
             return
 
-        overwrite = False
-        if "auto_vessel" in item.labels:
-            ans = QMessageBox.question(
-                self,
-                self._tr("dialog.auto_segment", "Auto Segment"),
-                self._tr("dialog.overwrite_auto_vessel", "Label auto_vessel already exists. Overwrite it?"),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if ans != QMessageBox.StandardButton.Yes:
-                return
-            overwrite = True
-        self._pending_auto_segment_overwrite = overwrite
-
-        self._set_ai_buttons_enabled(False)
-        self._update_status(self._tr("status.auto_segment_running", "Running FR-UNet auto segmentation..."))
+        next_task.status = "running"
+        next_task.started_at = datetime.now()
+        self.current_auto_segment_task_id = next_task.task_id
+        self._refresh_tasks()
 
         self._segment_thread = QThread(self)
-        self._segment_worker = AutoSegmentWorker(self.auto_segment_service, item.path)
+        self._segment_worker = AutoSegmentWorker(
+            self.auto_segment_service,
+            next_task.task_id,
+            next_task.image_path,
+            next_task.cancel_event,
+        )
         self._segment_worker.moveToThread(self._segment_thread)
         self._segment_thread.started.connect(self._segment_worker.run)
-        self._segment_worker.finished.connect(self._on_auto_segment_finished)
+        self._segment_worker.finished.connect(self._on_auto_segment_task_finished)
         self._segment_worker.finished.connect(self._segment_thread.quit)
         self._segment_worker.finished.connect(self._segment_worker.deleteLater)
         self._segment_thread.finished.connect(self._segment_thread.deleteLater)
         self._segment_thread.finished.connect(self._clear_segment_worker)
         self._segment_thread.start()
 
-    def _on_auto_segment_finished(self, ok: bool, mask_obj: object, log: str) -> None:
-        self._set_ai_buttons_enabled(True)
-        item = self.current_image_item
-        if not ok:
-            QMessageBox.critical(
-                self,
-                self._tr("error.auto_segment_failed", "Auto segment failed"),
-                log or self._tr("error.unknown_error", "Unknown error"),
-            )
-            self._update_status(self._tr("error.auto_segment_failed", "Auto segment failed"))
+    def _on_auto_segment_task_finished(self, task_id: int, status: str, mask_obj: object, log: str) -> None:
+        task = self._get_auto_segment_task(task_id)
+        if task is None:
             return
-        if item is None or self.current_image_rgb is None or not isinstance(mask_obj, np.ndarray):
-            QMessageBox.critical(
-                self,
-                self._tr("error.auto_segment_failed", "Auto segment failed"),
-                self._tr("error.image_context_changed", "Current image changed before segmentation finished."),
+
+        if status == "canceled":
+            self.auto_segment_tasks = [item for item in self.auto_segment_tasks if item.task_id != task_id]
+            self._refresh_tasks()
+            return
+
+        if status == "failed":
+            task.status = "failed"
+            task.error = log or self._tr("error.unknown_error", "Unknown error")
+            self._refresh_tasks()
+            self._update_status(
+                self._tr("error.auto_segment_failed_for", "Auto segment failed: {name}").format(
+                    name=task.image_item.name
+                )
             )
             return
 
         try:
             label = self.auto_segment_service.create_or_overwrite_label(
-                item,
+                task.image_item,
                 mask_obj,
                 label_name="auto_vessel",
                 color=(255, 255, 255),
-                overwrite=getattr(self, "_pending_auto_segment_overwrite", False),
+                overwrite=True,
             )
-            path = self.auto_segment_service.save_label_tar(item, label)
+            path = self.auto_segment_service.save_label_tar(task.image_item, label)
         except Exception as exc:
-            QMessageBox.critical(self, self._tr("error.auto_segment_failed", "Auto segment failed"), str(exc))
+            task.status = "failed"
+            task.error = str(exc)
+            self._refresh_tasks()
             return
 
-        self._refresh_labels()
-        self.select_label_by_name(label.label_name)
-        label.ensure_mask(self.current_image_rgb.shape[:2])
-        self.canvas.set_scene(self.current_image_rgb, label.mask, label.display_color, preserve_view=True)
-        self.canvas.set_overlay_visible(label.visible)
-        self.canvas.set_editable(not label.locked)
-        self._refresh_file_row(self.current_image_index)
+        self.auto_segment_tasks = [item for item in self.auto_segment_tasks if item.task_id != task_id]
+        completed_index = self._image_index_for_path(task.image_path)
+        if completed_index is not None:
+            self._refresh_file_row(completed_index)
+        if self.current_image_item is task.image_item and self.current_image_rgb is not None:
+            self._refresh_labels()
+            self.select_label_by_name(label.label_name)
+            label.ensure_mask(self.current_image_rgb.shape[:2])
+            self.canvas.set_scene(self.current_image_rgb, label.mask, label.display_color, preserve_view=True)
+            self.canvas.set_overlay_visible(label.visible)
+            self.canvas.set_editable(not label.locked)
+        self._refresh_tasks()
         self._update_status(self._tr("status.auto_segment_saved", "Auto segmentation saved {name}").format(name=path.name))
 
     def _clear_segment_worker(self) -> None:
         self._segment_thread = None
         self._segment_worker = None
+        self.current_auto_segment_task_id = None
+        self._start_next_auto_segment_task()
 
     def _set_ai_buttons_enabled(self, enabled: bool) -> None:
-        """统一控制 AI 相关按钮状态，防止重复安装或重复推理。"""
+        """统一控制 AI 安装按钮状态；分割按钮由任务队列允许重复提交不同样本。"""
 
         self.btn_install_fr_unet.setEnabled(enabled)
-        self.btn_auto_segment.setEnabled(enabled)
         self.toolbar_install_fr_unet_action.setEnabled(enabled)
-        self.toolbar_auto_segment_action.setEnabled(enabled)
         self.menu_install_fr_unet_action.setEnabled(enabled)
-        self.menu_auto_segment_action.setEnabled(enabled)
+
+    def _get_auto_segment_task(self, task_id: int) -> AutoSegmentTask | None:
+        for task in self.auto_segment_tasks:
+            if task.task_id == task_id:
+                return task
+        return None
+
+    def _image_index_for_path(self, image_path: Path) -> int | None:
+        target = image_path.resolve()
+        for index, item in enumerate(self.images):
+            if item.path.resolve() == target:
+                return index
+        return None
+
+    def cancel_auto_segment_task(self, task_id: int) -> None:
+        task = self._get_auto_segment_task(task_id)
+        if task is None:
+            return
+        if task.status == "queued":
+            self.auto_segment_tasks = [item for item in self.auto_segment_tasks if item.task_id != task_id]
+            self._refresh_tasks()
+            return
+        if task.status == "running":
+            task.status = "canceling"
+            task.cancel_event.set()
+            self._refresh_tasks()
+
+    def delete_auto_segment_task(self, task_id: int) -> None:
+        task = self._get_auto_segment_task(task_id)
+        if task is None or task.status != "failed":
+            return
+        self.auto_segment_tasks = [item for item in self.auto_segment_tasks if item.task_id != task_id]
+        self._refresh_tasks()
 
     def rename_label(self) -> None:
         label = self.current_label
@@ -1824,6 +2008,9 @@ class MainWindow(QMainWindow):
                 return
 
     def closeEvent(self, event) -> None:
+        for task in self.auto_segment_tasks:
+            if task.status in {"queued", "running", "canceling"}:
+                task.cancel_event.set()
         if self._guard_unsaved_before_switch():
             event.accept()
         else:
