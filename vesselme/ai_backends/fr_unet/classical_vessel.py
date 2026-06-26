@@ -103,9 +103,7 @@ def _keep_large_connected_vessels(mask: np.ndarray, valid: np.ndarray, cancel_ev
         if area >= min_area and longer_side >= 18 and is_line_like:
             cleaned[labels == label_id] = 255
 
-    # 输出稍微偏粗，方便用户把它当初始 mask 用橡皮修边。
     cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
-    cleaned = cv2.dilate(cleaned, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), iterations=1)
     cleaned[valid == 0] = 0
     return cleaned
 

@@ -39,7 +39,7 @@ class AutoSegmentService:
         返回值是该区域自身大小的二值 mask，主窗口负责并入目标标签。
         """
 
-        if algorithm not in {"classical", "fr_unet"}:
+        if algorithm not in {"classical", "fr_unet", "u2net_e", "lwnet_hrf"}:
             raise ValueError(f"Unknown auto segment algorithm: {algorithm}")
         if roi is None:
             if algorithm == "fr_unet":
@@ -52,6 +52,10 @@ class AutoSegmentService:
                     threshold=threshold,
                     cancel_event=cancel_event,
                 )
+            if algorithm == "u2net_e":
+                return self.predict_mask_with_u2net_e(image_path, cancel_event=cancel_event)
+            if algorithm == "lwnet_hrf":
+                return self.predict_mask_with_lwnet(image_path, cancel_event=cancel_event)
             return normalize_mask(segment_clarus_vessels(image_path, cancel_event=cancel_event))
 
         roi_image_path = self._write_roi_image(image_path, roi)
@@ -66,7 +70,18 @@ class AutoSegmentService:
                     threshold=threshold,
                     cancel_event=cancel_event,
                 )
-            return normalize_mask(segment_clarus_vessels(roi_image_path, cancel_event=cancel_event))
+            if algorithm == "u2net_e":
+                return self.predict_mask_with_u2net_e(roi_image_path, cancel_event=cancel_event)
+            if algorithm == "lwnet_hrf":
+                return self.predict_mask_with_lwnet(roi_image_path, cancel_event=cancel_event)
+            x0, y0, x1, y1 = roi
+            return normalize_mask(
+                segment_clarus_vessels(
+                    roi_image_path,
+                    downsample_long_edge=max(x1 - x0, y1 - y0),
+                    cancel_event=cancel_event,
+                )
+            )
         finally:
             roi_image_path.unlink(missing_ok=True)
 
@@ -96,24 +111,49 @@ class AutoSegmentService:
                 batch_size=batch_size,
                 threshold=threshold,
             )
-            process = subprocess.Popen(
-                command,
-                cwd=str(self.runtime_manager.project_root),
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            while process.poll() is None:
-                if cancel_event is not None and cancel_event.is_set():
-                    process.kill()
-                    process.communicate()
-                    raise AutoSegmentCanceled("Auto segmentation canceled")
-                time.sleep(0.2)
-            stdout, stderr = process.communicate()
-            if process.returncode != 0:
-                raise subprocess.CalledProcessError(process.returncode, command, output=stdout, stderr=stderr)
+            self._run_cancelable_command(command, cancel_event=cancel_event)
             mask = np.load(output_path)
         return normalize_mask(mask)
+
+    def predict_mask_with_u2net_e(self, image_path: Path, *, cancel_event=None) -> np.ndarray:
+        """调用 U²Net-E ONNX 子进程，返回二值 mask。"""
+
+        with tempfile.TemporaryDirectory(prefix="vesselme_u2net_e_") as tmp_dir:
+            output_path = Path(tmp_dir) / "mask.npy"
+            command = self.runtime_manager.build_u2net_e_runner_command(image_path, output_path)
+            self._run_cancelable_command(command, cancel_event=cancel_event)
+            mask = np.load(output_path)
+        return normalize_mask(mask)
+
+    def predict_mask_with_lwnet(self, image_path: Path, *, cancel_event=None) -> np.ndarray:
+        """调用 LWNet HRF 子进程，返回二值 mask。"""
+
+        with tempfile.TemporaryDirectory(prefix="vesselme_lwnet_") as tmp_dir:
+            output_path = Path(tmp_dir) / "mask.npy"
+            command = self.runtime_manager.build_lwnet_runner_command(image_path, output_path)
+            self._run_cancelable_command(command, cancel_event=cancel_event)
+            mask = np.load(output_path)
+        return normalize_mask(mask)
+
+    def _run_cancelable_command(self, command: list[str], *, cancel_event=None) -> None:
+        """运行后端子进程；取消任务时杀掉真实推理进程。"""
+
+        process = subprocess.Popen(
+            command,
+            cwd=str(self.runtime_manager.project_root),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        while process.poll() is None:
+            if cancel_event is not None and cancel_event.is_set():
+                process.kill()
+                process.communicate()
+                raise AutoSegmentCanceled("Auto segmentation canceled")
+            time.sleep(0.2)
+        stdout, stderr = process.communicate()
+        if process.returncode != 0:
+            raise subprocess.CalledProcessError(process.returncode, command, output=stdout, stderr=stderr)
 
     def _write_roi_image(self, image_path: Path, roi: tuple[int, int, int, int]) -> Path:
         """把图像 ROI 写成临时图片，让两类后端共用同一套单图入口。"""

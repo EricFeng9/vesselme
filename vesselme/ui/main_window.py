@@ -53,24 +53,32 @@ from vesselme.ui.icons import delete_icon, eye_icon, lock_icon, rename_icon
 
 
 class InstallFrUnetWorker(QObject):
-    """在后台线程执行 FR-UNet 一键安装，避免阻塞 Qt 主线程。"""
+    """在后台线程执行 AI 后端一键安装，避免阻塞 Qt 主线程。"""
 
-    finished = Signal(bool, str)
+    finished = Signal(str, bool, str)
 
-    def __init__(self, runtime_manager: ModelRuntimeManager) -> None:
+    def __init__(self, runtime_manager: ModelRuntimeManager, backend: str) -> None:
         super().__init__()
         self.runtime_manager = runtime_manager
+        self.backend = backend
 
     def run(self) -> None:
         try:
-            result = self.runtime_manager.install()
+            if self.backend == "fr_unet":
+                result = self.runtime_manager.install()
+            elif self.backend == "u2net_e":
+                result = self.runtime_manager.install_u2net_e()
+            elif self.backend == "lwnet_hrf":
+                result = self.runtime_manager.install_lwnet()
+            else:
+                raise RuntimeError(f"Unknown backend: {self.backend}")
             log = "\n".join(part for part in [result.stdout, result.stderr] if part)
-            self.finished.emit(True, log.strip())
+            self.finished.emit(self.backend, True, log.strip())
         except subprocess.CalledProcessError as exc:
             log = "\n".join(part for part in [exc.stdout, exc.stderr, str(exc)] if part)
-            self.finished.emit(False, log.strip())
+            self.finished.emit(self.backend, False, log.strip())
         except Exception as exc:
-            self.finished.emit(False, str(exc))
+            self.finished.emit(self.backend, False, str(exc))
 
 
 class AutoSegmentWorker(QObject):
@@ -263,10 +271,16 @@ class MainWindow(QMainWindow):
         row_ai = QHBoxLayout()
         self.btn_install_fr_unet = QPushButton("Install FR-UNet")
         self.btn_install_fr_unet.clicked.connect(self.install_fr_unet)
+        self.btn_install_u2net_e = QPushButton("Install U²Net-E")
+        self.btn_install_u2net_e.clicked.connect(self.install_u2net_e)
+        self.btn_install_lwnet = QPushButton("Install LWNet")
+        self.btn_install_lwnet.clicked.connect(self.install_lwnet)
         self.btn_auto_segment = QPushButton("Auto Segment")
         self.btn_auto_segment.setObjectName("primary")
         self.btn_auto_segment.clicked.connect(self.auto_segment_current_image)
         row_ai.addWidget(self.btn_install_fr_unet)
+        row_ai.addWidget(self.btn_install_u2net_e)
+        row_ai.addWidget(self.btn_install_lwnet)
         row_ai.addWidget(self.btn_auto_segment)
 
         row4 = QHBoxLayout()
@@ -386,6 +400,16 @@ class MainWindow(QMainWindow):
         self.toolbar_install_fr_unet_action.triggered.connect(self.install_fr_unet)
         main_toolbar.addAction(self.toolbar_install_fr_unet_action)
 
+        self.toolbar_install_u2net_e_action = QAction("Install U²Net-E", self)
+        self.toolbar_install_u2net_e_action.setToolTip("Install the independent U²Net-E runtime and official ONNX weights.")
+        self.toolbar_install_u2net_e_action.triggered.connect(self.install_u2net_e)
+        main_toolbar.addAction(self.toolbar_install_u2net_e_action)
+
+        self.toolbar_install_lwnet_action = QAction("Install LWNet", self)
+        self.toolbar_install_lwnet_action.setToolTip("Install the independent LWNet runtime and official HRF weights.")
+        self.toolbar_install_lwnet_action.triggered.connect(self.install_lwnet)
+        main_toolbar.addAction(self.toolbar_install_lwnet_action)
+
         self.toolbar_auto_segment_action = QAction("Auto Segment", self)
         self.toolbar_auto_segment_action.setToolTip("Create an editable large-vessel auto_vessel label.")
         self.toolbar_auto_segment_action.triggered.connect(self.auto_segment_current_image)
@@ -485,6 +509,12 @@ class MainWindow(QMainWindow):
         self.algorithm_action_fr_unet = self.algorithm_menu.addAction("FR-UNet")
         self.algorithm_action_fr_unet.setCheckable(True)
         self.algorithm_action_fr_unet.triggered.connect(lambda: self.set_auto_segment_algorithm("fr_unet"))
+        self.algorithm_action_u2net_e = self.algorithm_menu.addAction("U²Net-E")
+        self.algorithm_action_u2net_e.setCheckable(True)
+        self.algorithm_action_u2net_e.triggered.connect(lambda: self.set_auto_segment_algorithm("u2net_e"))
+        self.algorithm_action_lwnet = self.algorithm_menu.addAction("LWNet HRF")
+        self.algorithm_action_lwnet.setCheckable(True)
+        self.algorithm_action_lwnet.triggered.connect(lambda: self.set_auto_segment_algorithm("lwnet_hrf"))
         self.btn_settings_tool.setMenu(self.settings_menu)
         left_toolbar.addWidget(self.btn_settings_tool)
 
@@ -676,6 +706,14 @@ class MainWindow(QMainWindow):
         self.menu_install_fr_unet_action.triggered.connect(self.install_fr_unet)
         self.file_menu.addAction(self.menu_install_fr_unet_action)
 
+        self.menu_install_u2net_e_action = QAction("Install U²Net-E", self)
+        self.menu_install_u2net_e_action.triggered.connect(self.install_u2net_e)
+        self.file_menu.addAction(self.menu_install_u2net_e_action)
+
+        self.menu_install_lwnet_action = QAction("Install LWNet", self)
+        self.menu_install_lwnet_action.triggered.connect(self.install_lwnet)
+        self.file_menu.addAction(self.menu_install_lwnet_action)
+
         self.menu_auto_segment_action = QAction("Auto Segment", self)
         self.menu_auto_segment_action.triggered.connect(self.auto_segment_current_image)
         self.file_menu.addAction(self.menu_auto_segment_action)
@@ -757,6 +795,8 @@ class MainWindow(QMainWindow):
         self.btn_new_label.setText(self._tr("btn.new", "New"))
         self.btn_import.setText(self._tr("btn.import_label_tar", "Import label (.tar)"))
         self.btn_install_fr_unet.setText(self._tr("btn.install_fr_unet", "Install FR-UNet"))
+        self.btn_install_u2net_e.setText(self._tr("btn.install_u2net_e", "Install U²Net-E"))
+        self.btn_install_lwnet.setText(self._tr("btn.install_lwnet", "Install LWNet"))
         self.btn_auto_segment.setText(self._tr("btn.auto_segment", "Auto Segment"))
         self.btn_save.setText(self._tr("btn.save_ctrl_s", "Save (Ctrl+S)"))
         self.btn_export.setText(self._tr("btn.export_stroke_png", "Export Stroke PNG"))
@@ -799,6 +839,20 @@ class MainWindow(QMainWindow):
                 "Install the independent FR-UNet runtime and official DRIVE weights.",
             )
         )
+        self.toolbar_install_u2net_e_action.setText(self._tr("toolbar.install_u2net_e", "Install U²Net-E"))
+        self.toolbar_install_u2net_e_action.setToolTip(
+            self._tr(
+                "tooltip.toolbar_install_u2net_e",
+                "Install the independent U²Net-E runtime and official ONNX weights.",
+            )
+        )
+        self.toolbar_install_lwnet_action.setText(self._tr("toolbar.install_lwnet", "Install LWNet"))
+        self.toolbar_install_lwnet_action.setToolTip(
+            self._tr(
+                "tooltip.toolbar_install_lwnet",
+                "Install the independent LWNet runtime and official HRF weights.",
+            )
+        )
         self.toolbar_auto_segment_action.setText(self._tr("toolbar.auto_segment", "Auto Segment"))
         self.toolbar_auto_segment_action.setToolTip(
             self._tr("tooltip.toolbar_auto_segment", "Create an editable large-vessel auto_vessel label.")
@@ -825,6 +879,8 @@ class MainWindow(QMainWindow):
         self.algorithm_menu.setTitle(self._tr("menu.segmentation_algorithm", "Segmentation algorithm"))
         self.algorithm_action_classical.setText(self._tr("menu.algorithm_classical", "Classical"))
         self.algorithm_action_fr_unet.setText(self._tr("menu.algorithm_fr_unet", "FR-UNet"))
+        self.algorithm_action_u2net_e.setText(self._tr("menu.algorithm_u2net_e", "U²Net-E"))
+        self.algorithm_action_lwnet.setText(self._tr("menu.algorithm_lwnet", "LWNet HRF"))
         self._refresh_algorithm_menu()
 
         self.lang_menu_button.setText("EN ▾" if self.current_language == "en" else "中 ▾")
@@ -843,6 +899,8 @@ class MainWindow(QMainWindow):
         self.menu_import_action.setText(self._tr("menu.import_label_tar", "Import Label Tar"))
         self.menu_import_image_action.setText(self._tr("menu.import_label_from_image", "Import Label from Image"))
         self.menu_install_fr_unet_action.setText(self._tr("menu.install_fr_unet", "Install FR-UNet"))
+        self.menu_install_u2net_e_action.setText(self._tr("menu.install_u2net_e", "Install U²Net-E"))
+        self.menu_install_lwnet_action.setText(self._tr("menu.install_lwnet", "Install LWNet"))
         self.menu_auto_segment_action.setText(self._tr("menu.auto_segment", "Auto Segment"))
         self.menu_export_action.setText(self._tr("menu.export_stroke_png", "Export Stroke PNG"))
         self.menu_prev_action.setText(self._tr("menu.previous_image", "Previous Image"))
@@ -1519,38 +1577,61 @@ class MainWindow(QMainWindow):
     def install_fr_unet(self) -> None:
         """从 UI 触发 FR-UNet 独立运行时安装。"""
 
+        self._install_backend("fr_unet")
+
+    def install_u2net_e(self) -> None:
+        """从 UI 触发 U²Net-E 独立运行时安装。"""
+
+        self._install_backend("u2net_e")
+
+    def install_lwnet(self) -> None:
+        """从 UI 触发 LWNet 独立运行时安装。"""
+
+        self._install_backend("lwnet_hrf")
+
+    def _install_backend(self, backend: str) -> None:
+        """启动指定 AI 后端的一键安装后台线程。"""
+
         if self._install_thread is not None:
             return
+        backend_name = self._algorithm_display_name(backend)
         self._set_ai_buttons_enabled(False)
-        self._update_status(self._tr("status.fr_unet_installing", "Installing FR-UNet runtime..."))
+        self._update_status(
+            self._tr("status.backend_installing", "Installing {backend} runtime...").format(backend=backend_name)
+        )
 
         self._install_thread = QThread(self)
-        self._install_worker = InstallFrUnetWorker(self.runtime_manager)
+        self._install_worker = InstallFrUnetWorker(self.runtime_manager, backend)
         self._install_worker.moveToThread(self._install_thread)
         self._install_thread.started.connect(self._install_worker.run)
-        self._install_worker.finished.connect(self._on_fr_unet_install_finished)
+        self._install_worker.finished.connect(self._on_backend_install_finished)
         self._install_worker.finished.connect(self._install_thread.quit)
         self._install_worker.finished.connect(self._install_worker.deleteLater)
         self._install_thread.finished.connect(self._install_thread.deleteLater)
         self._install_thread.finished.connect(self._clear_install_worker)
         self._install_thread.start()
 
-    def _on_fr_unet_install_finished(self, ok: bool, log: str) -> None:
+    def _on_backend_install_finished(self, backend: str, ok: bool, log: str) -> None:
         self._set_ai_buttons_enabled(True)
+        backend_name = self._algorithm_display_name(backend)
         if ok:
-            self._update_status(self._tr("status.fr_unet_ready", "FR-UNet is ready."))
+            self._update_status(
+                self._tr("status.backend_ready", "{backend} is ready.").format(backend=backend_name)
+            )
             QMessageBox.information(
                 self,
-                self._tr("dialog.fr_unet_install", "Install FR-UNet"),
-                self._tr("status.fr_unet_ready", "FR-UNet is ready."),
+                self._tr("dialog.install_backend", "Install {backend}").format(backend=backend_name),
+                self._tr("status.backend_ready", "{backend} is ready.").format(backend=backend_name),
             )
             return
         QMessageBox.critical(
             self,
-            self._tr("error.fr_unet_install_failed", "FR-UNet install failed"),
+            self._tr("error.backend_install_failed", "{backend} install failed").format(backend=backend_name),
             log or self._tr("error.unknown_error", "Unknown error"),
         )
-        self._update_status(self._tr("error.fr_unet_install_failed", "FR-UNet install failed"))
+        self._update_status(
+            self._tr("error.backend_install_failed", "{backend} install failed").format(backend=backend_name)
+        )
 
     def _clear_install_worker(self) -> None:
         self._install_thread = None
@@ -1775,8 +1856,14 @@ class MainWindow(QMainWindow):
         """统一控制 AI 安装按钮状态；分割按钮由任务队列允许重复提交不同样本。"""
 
         self.btn_install_fr_unet.setEnabled(enabled)
+        self.btn_install_u2net_e.setEnabled(enabled)
+        self.btn_install_lwnet.setEnabled(enabled)
         self.toolbar_install_fr_unet_action.setEnabled(enabled)
+        self.toolbar_install_u2net_e_action.setEnabled(enabled)
+        self.toolbar_install_lwnet_action.setEnabled(enabled)
         self.menu_install_fr_unet_action.setEnabled(enabled)
+        self.menu_install_u2net_e_action.setEnabled(enabled)
+        self.menu_install_lwnet_action.setEnabled(enabled)
 
     def _get_auto_segment_task(self, task_id: int) -> AutoSegmentTask | None:
         for task in self.auto_segment_tasks:
@@ -2001,7 +2088,7 @@ class MainWindow(QMainWindow):
     def set_auto_segment_algorithm(self, algorithm: str) -> None:
         """设置全图和框选分割共用的算法。"""
 
-        if algorithm not in {"classical", "fr_unet"}:
+        if algorithm not in {"classical", "fr_unet", "u2net_e", "lwnet_hrf"}:
             return
         self.auto_segment_algorithm = algorithm
         self._refresh_algorithm_menu()
@@ -2014,10 +2101,16 @@ class MainWindow(QMainWindow):
     def _refresh_algorithm_menu(self) -> None:
         self.algorithm_action_classical.setChecked(self.auto_segment_algorithm == "classical")
         self.algorithm_action_fr_unet.setChecked(self.auto_segment_algorithm == "fr_unet")
+        self.algorithm_action_u2net_e.setChecked(self.auto_segment_algorithm == "u2net_e")
+        self.algorithm_action_lwnet.setChecked(self.auto_segment_algorithm == "lwnet_hrf")
 
     def _algorithm_display_name(self, algorithm: str) -> str:
         if algorithm == "fr_unet":
             return "FR-UNet"
+        if algorithm == "u2net_e":
+            return "U²Net-E"
+        if algorithm == "lwnet_hrf":
+            return "LWNet HRF"
         return self._tr("algorithm.classical", "Classical")
 
     def _set_brush(self, size: float) -> None:
