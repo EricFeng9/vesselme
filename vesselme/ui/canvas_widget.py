@@ -34,6 +34,7 @@ class CanvasWidget(QWidget):
     brushChanged = Signal(float)
     message = Signal(str)
     dirtyChanged = Signal()
+    squareSelectionFinished = Signal(int, int, int, int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -65,6 +66,9 @@ class CanvasWidget(QWidget):
         self.stroke_last_point: tuple[float, float] | None = None
 
         self.pan_active = False
+        self.square_select_active = False
+        self.square_select_anchor: tuple[float, float] | None = None
+        self.square_select_current: tuple[float, float] | None = None
         self.drag_anchor = QPoint()
         self.empty_hint_text = "Open Folder to start annotation\n\nB: Brush  E: Eraser  A: Toggle Overlay"
         self._sync_cursor()
@@ -264,10 +268,24 @@ class CanvasWidget(QWidget):
         if self.last_image_pos_float is not None:
             cx, cy = self.last_image_pos_float
             wx, wy = self._image_to_widget_float(cx, cy)
-            pen = QPen(QColor(255, 255, 255, 220))
-            pen.setWidth(1)
-            p.setPen(pen)
-            p.drawEllipse(QPointF(wx, wy), self.brush_size * self.scale / 2.0, self.brush_size * self.scale / 2.0)
+            if self.current_tool in {"brush", "eraser"}:
+                pen = QPen(QColor(255, 255, 255, 220))
+                pen.setWidth(1)
+                p.setPen(pen)
+                p.drawEllipse(QPointF(wx, wy), self.brush_size * self.scale / 2.0, self.brush_size * self.scale / 2.0)
+
+        if self.square_select_active and self.square_select_anchor and self.square_select_current:
+            rect = self._square_selection_rect(self.square_select_anchor, self.square_select_current)
+            if rect is not None:
+                x0, y0, x1, y1 = rect
+                wx0, wy0 = self._image_to_widget_float(x0, y0)
+                wx1, wy1 = self._image_to_widget_float(x1, y1)
+                pen = QPen(QColor(255, 214, 10, 235))
+                pen.setWidth(2)
+                pen.setStyle(Qt.PenStyle.DashLine)
+                p.setPen(pen)
+                p.setBrush(QColor(255, 214, 10, 28))
+                p.drawRect(QRectF(QPointF(wx0, wy0), QPointF(wx1, wy1)).normalized())
 
     def _rebuild_overlay_cache(self) -> None:
         if self.mask is None:
@@ -357,16 +375,23 @@ class CanvasWidget(QWidget):
         if event.button() not in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
             return
 
+        image_pos = self._widget_to_image_float_clamped(event.position())
+        if image_pos is None:
+            return
+
+        if self.current_tool == "segment_box" and event.button() == Qt.MouseButton.LeftButton:
+            self.square_select_active = True
+            self.square_select_anchor = image_pos
+            self.square_select_current = image_pos
+            self.update()
+            return
+
         if self.mask is None:
             self.message.emit("No label selected. Create or select a label first.")
             return
 
         if not self.editable:
             self.message.emit("Current label is locked.")
-            return
-
-        image_pos = self._widget_to_image_float_clamped(event.position())
-        if image_pos is None:
             return
 
         self.stroke_state.active = True
@@ -399,6 +424,12 @@ class CanvasWidget(QWidget):
             self.update()
             return
 
+        if self.square_select_active:
+            if image_pos is not None:
+                self.square_select_current = image_pos
+                self.update()
+            return
+
         if self.stroke_state.active and image_pos is not None and self.stroke_last_point is not None:
             self._apply_stroke_segment(self.stroke_last_point, image_pos, self.stroke_state.mode)
             self.stroke_last_point = image_pos
@@ -413,6 +444,9 @@ class CanvasWidget(QWidget):
         ):
             self.pan_active = False
             self._sync_cursor()
+            return
+        if event.button() == Qt.MouseButton.LeftButton and self.square_select_active:
+            self._finish_square_selection()
             return
         if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton) and self.stroke_state.active:
             self._finish_stroke()
@@ -498,6 +532,51 @@ class CanvasWidget(QWidget):
         self.stroke_state.reset()
         self.update()
 
+    def _square_selection_rect(
+        self,
+        anchor: tuple[float, float],
+        current: tuple[float, float],
+    ) -> tuple[int, int, int, int] | None:
+        """根据拖拽起点和当前点计算图像坐标里的正方形 ROI。"""
+
+        if self.image_rgb is None:
+            return None
+        height, width = self.image_rgb.shape[:2]
+        dx = current[0] - anchor[0]
+        dy = current[1] - anchor[1]
+        side = max(abs(dx), abs(dy))
+        if side < 4:
+            return None
+        x1 = anchor[0] + side * (1.0 if dx >= 0 else -1.0)
+        y1 = anchor[1] + side * (1.0 if dy >= 0 else -1.0)
+        x0 = int(np.floor(min(anchor[0], x1)))
+        y0 = int(np.floor(min(anchor[1], y1)))
+        x2 = int(np.ceil(max(anchor[0], x1)))
+        y2 = int(np.ceil(max(anchor[1], y1)))
+        x0 = max(0, min(width - 1, x0))
+        y0 = max(0, min(height - 1, y0))
+        x2 = max(1, min(width, x2))
+        y2 = max(1, min(height, y2))
+        if x2 <= x0 or y2 <= y0:
+            return None
+        side_clamped = min(x2 - x0, y2 - y0)
+        return x0, y0, x0 + side_clamped, y0 + side_clamped
+
+    def _finish_square_selection(self) -> None:
+        """结束正方形框选，并把 ROI 交给主窗口提交分割任务。"""
+
+        rect = None
+        if self.square_select_anchor and self.square_select_current:
+            rect = self._square_selection_rect(self.square_select_anchor, self.square_select_current)
+        self.square_select_active = False
+        self.square_select_anchor = None
+        self.square_select_current = None
+        self.update()
+        if rect is None:
+            self.message.emit("Selection is too small.")
+            return
+        self.squareSelectionFinished.emit(*rect)
+
     def _is_space_pressed(self) -> bool:
         return bool(self.window() and self.window().property("space_pressed"))
 
@@ -508,7 +587,7 @@ class CanvasWidget(QWidget):
         if not self.editable:
             self.setCursor(Qt.CursorShape.ArrowCursor)
             return
-        if self.current_tool in {"brush", "eraser"}:
+        if self.current_tool in {"brush", "eraser", "segment_box"}:
             self.setCursor(Qt.CursorShape.CrossCursor)
             return
         self.setCursor(Qt.CursorShape.ArrowCursor)

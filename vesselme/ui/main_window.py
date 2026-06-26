@@ -83,17 +83,26 @@ class AutoSegmentWorker(QObject):
         service: AutoSegmentService,
         task_id: int,
         image_path: Path,
+        algorithm: str,
+        roi: tuple[int, int, int, int] | None,
         cancel_event: threading.Event,
     ) -> None:
         super().__init__()
         self.service = service
         self.task_id = task_id
         self.image_path = image_path
+        self.algorithm = algorithm
+        self.roi = roi
         self.cancel_event = cancel_event
 
     def run(self) -> None:
         try:
-            mask = self.service.predict_mask(self.image_path, cancel_event=self.cancel_event)
+            mask = self.service.predict_mask(
+                self.image_path,
+                algorithm=self.algorithm,
+                roi=self.roi,
+                cancel_event=self.cancel_event,
+            )
             self.finished.emit(self.task_id, "done", mask, "")
         except AutoSegmentCanceled:
             self.finished.emit(self.task_id, "canceled", None, "")
@@ -110,6 +119,9 @@ class AutoSegmentTask:
 
     task_id: int
     image_item: ImageItem
+    algorithm: str
+    roi: tuple[int, int, int, int] | None = None
+    target_label_name: str | None = None
     status: str = "queued"
     error: str = ""
     created_at: datetime = field(default_factory=datetime.now)
@@ -145,6 +157,7 @@ class MainWindow(QMainWindow):
         self._task_id_counter = itertools.count(1)
         self.auto_segment_tasks: list[AutoSegmentTask] = []
         self.current_auto_segment_task_id: int | None = None
+        self.auto_segment_algorithm = "classical"
 
         self.setProperty("space_pressed", False)
         self._build_ui()
@@ -221,6 +234,7 @@ class MainWindow(QMainWindow):
         self.canvas.brushChanged.connect(self._on_brush_changed)
         self.canvas.dirtyChanged.connect(self._on_canvas_dirty)
         self.canvas.message.connect(self._update_status)
+        self.canvas.squareSelectionFinished.connect(self.auto_segment_roi)
 
         canvas_layout.addLayout(canvas_title_row)
         canvas_layout.addWidget(separator)
@@ -436,6 +450,13 @@ class MainWindow(QMainWindow):
         self.btn_eraser_tool.clicked.connect(lambda: self.set_tool("eraser"))
         left_toolbar.addWidget(self.btn_eraser_tool)
 
+        self.btn_segment_box_tool = QToolButton()
+        self.btn_segment_box_tool.setText("□")
+        self.btn_segment_box_tool.setToolTip("Box Segment")
+        self.btn_segment_box_tool.setCheckable(True)
+        self.btn_segment_box_tool.clicked.connect(lambda: self.set_tool("segment_box"))
+        left_toolbar.addWidget(self.btn_segment_box_tool)
+
         self.btn_clear = QToolButton()
         self.btn_clear.setText("🗑️")
         self.btn_clear.setToolTip("Clear Label")
@@ -448,6 +469,25 @@ class MainWindow(QMainWindow):
         self.btn_help_tool.clicked.connect(self.show_quick_tutorial)
         left_toolbar.addWidget(self.btn_help_tool)
 
+        left_spacer = QWidget()
+        left_spacer.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        left_toolbar.addWidget(left_spacer)
+
+        self.btn_settings_tool = QToolButton()
+        self.btn_settings_tool.setText("⚙")
+        self.btn_settings_tool.setToolTip("Settings")
+        self.btn_settings_tool.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.settings_menu = QMenu(self.btn_settings_tool)
+        self.algorithm_menu = self.settings_menu.addMenu("Segmentation algorithm")
+        self.algorithm_action_classical = self.algorithm_menu.addAction("Classical")
+        self.algorithm_action_classical.setCheckable(True)
+        self.algorithm_action_classical.triggered.connect(lambda: self.set_auto_segment_algorithm("classical"))
+        self.algorithm_action_fr_unet = self.algorithm_menu.addAction("FR-UNet")
+        self.algorithm_action_fr_unet.setCheckable(True)
+        self.algorithm_action_fr_unet.triggered.connect(lambda: self.set_auto_segment_algorithm("fr_unet"))
+        self.btn_settings_tool.setMenu(self.settings_menu)
+        left_toolbar.addWidget(self.btn_settings_tool)
+
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         self._build_actions()
@@ -459,8 +499,10 @@ class MainWindow(QMainWindow):
     def _set_tool_buttons(self) -> None:
         is_brush = self.canvas.current_tool == "brush"
         is_eraser = self.canvas.current_tool == "eraser"
+        is_segment_box = self.canvas.current_tool == "segment_box"
         self.btn_brush_tool.setChecked(is_brush)
         self.btn_eraser_tool.setChecked(is_eraser)
+        self.btn_segment_box_tool.setChecked(is_segment_box)
 
     def _apply_theme(self) -> None:
         self.setStyleSheet(
@@ -776,8 +818,14 @@ class MainWindow(QMainWindow):
 
         self.btn_brush_tool.setToolTip(self._tr("tooltip.brush", "Brush (B)"))
         self.btn_eraser_tool.setToolTip(self._tr("tooltip.eraser", "Eraser (E)"))
+        self.btn_segment_box_tool.setToolTip(self._tr("tooltip.segment_box", "Box Segment"))
         self.btn_clear.setToolTip(self._tr("tooltip.clear_label", "Clear Label"))
         self.btn_help_tool.setToolTip(self._tr("tooltip.quick_tutorial", "Quick tutorial"))
+        self.btn_settings_tool.setToolTip(self._tr("tooltip.settings", "Settings"))
+        self.algorithm_menu.setTitle(self._tr("menu.segmentation_algorithm", "Segmentation algorithm"))
+        self.algorithm_action_classical.setText(self._tr("menu.algorithm_classical", "Classical"))
+        self.algorithm_action_fr_unet.setText(self._tr("menu.algorithm_fr_unet", "FR-UNet"))
+        self._refresh_algorithm_menu()
 
         self.lang_menu_button.setText("EN ▾" if self.current_language == "en" else "中 ▾")
         self.lang_menu_button.setToolTip(self._tr("tooltip.switch_language", "Switch UI language"))
@@ -1217,15 +1265,23 @@ class MainWindow(QMainWindow):
             text_col.setContentsMargins(0, 0, 0, 0)
             text_col.setSpacing(3)
 
-            name_label = QLabel(task.image_item.name)
+            prefix = self._tr("task.kind.roi", "ROI") if task.roi is not None else self._tr("task.kind.full", "Full")
+            name_label = QLabel(f"{prefix}: {task.image_item.name}")
             name_label.setStyleSheet("font-weight: 600; color: #102a43;")
 
             status_text = self._task_status_text(task, queued_ids)
             status_label = QLabel(status_text)
             status_label.setProperty("muted", True)
+            algorithm_label = QLabel(
+                self._tr("task.algorithm", "Algorithm: {algorithm}").format(
+                    algorithm=self._algorithm_display_name(task.algorithm)
+                )
+            )
+            algorithm_label.setProperty("muted", True)
 
             text_col.addWidget(name_label)
             text_col.addWidget(status_label)
+            text_col.addWidget(algorithm_label)
             if task.status == "failed" and task.error:
                 error_label = QLabel(task.error[:160])
                 error_label.setWordWrap(True)
@@ -1515,7 +1571,11 @@ class MainWindow(QMainWindow):
             )
             return
 
-        task = AutoSegmentTask(task_id=next(self._task_id_counter), image_item=item)
+        task = AutoSegmentTask(
+            task_id=next(self._task_id_counter),
+            image_item=item,
+            algorithm=self.auto_segment_algorithm,
+        )
         self.auto_segment_tasks.append(task)
         self.side_tabs.setCurrentWidget(self.tasks_tab)
         self._refresh_tasks()
@@ -1523,6 +1583,50 @@ class MainWindow(QMainWindow):
             self._tr(
                 "status.auto_segment_task_queued",
                 "Auto segmentation task queued: {name}",
+            ).format(name=item.name)
+        )
+        self._start_next_auto_segment_task()
+
+    def auto_segment_roi(self, x0: int, y0: int, x1: int, y1: int) -> None:
+        """提交当前图像的框选 ROI 分割任务，完成后并入目标标签。"""
+
+        item = self.current_image_item
+        if item is None or self.current_image_rgb is None:
+            return
+        existing = self._find_active_auto_segment_task(item.path)
+        if existing is not None:
+            QMessageBox.information(
+                self,
+                self._tr("dialog.auto_segment", "Auto Segment"),
+                self._tr("warn.auto_segment_task_exists", "This image already has an auto segment task."),
+            )
+            return
+
+        target_label_name = self.current_label_name
+        if target_label_name is not None:
+            label = item.labels.get(target_label_name)
+            if label is not None and label.locked:
+                QMessageBox.warning(
+                    self,
+                    self._tr("dialog.auto_segment", "Auto Segment"),
+                    self._tr("status.current_label_locked", "Current label is locked."),
+                )
+                return
+
+        task = AutoSegmentTask(
+            task_id=next(self._task_id_counter),
+            image_item=item,
+            algorithm=self.auto_segment_algorithm,
+            roi=(x0, y0, x1, y1),
+            target_label_name=target_label_name,
+        )
+        self.auto_segment_tasks.append(task)
+        self.side_tabs.setCurrentWidget(self.tasks_tab)
+        self._refresh_tasks()
+        self._update_status(
+            self._tr(
+                "status.roi_segment_task_queued",
+                "ROI segmentation task queued: {name}",
             ).format(name=item.name)
         )
         self._start_next_auto_segment_task()
@@ -1553,6 +1657,8 @@ class MainWindow(QMainWindow):
             self.auto_segment_service,
             next_task.task_id,
             next_task.image_path,
+            next_task.algorithm,
+            next_task.roi,
             next_task.cancel_event,
         )
         self._segment_worker.moveToThread(self._segment_thread)
@@ -1586,13 +1692,16 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            label = self.auto_segment_service.create_or_overwrite_label(
-                task.image_item,
-                mask_obj,
-                label_name="auto_vessel",
-                color=(255, 255, 255),
-                overwrite=True,
-            )
+            if task.roi is None:
+                label = self.auto_segment_service.create_or_overwrite_label(
+                    task.image_item,
+                    mask_obj,
+                    label_name="auto_vessel",
+                    color=(255, 255, 255),
+                    overwrite=True,
+                )
+            else:
+                label = self._merge_roi_segment_result(task, mask_obj)
             path = self.auto_segment_service.save_label_tar(task.image_item, label)
         except Exception as exc:
             task.status = "failed"
@@ -1613,6 +1722,48 @@ class MainWindow(QMainWindow):
             self.canvas.set_editable(not label.locked)
         self._refresh_tasks()
         self._update_status(self._tr("status.auto_segment_saved", "Auto segmentation saved {name}").format(name=path.name))
+
+    def _merge_roi_segment_result(self, task: AutoSegmentTask, roi_mask: object):
+        """把 ROI 分割结果并入目标标签；没有目标标签时自动创建新标签。"""
+
+        if self.current_image_rgb is None and task.image_item is self.current_image_item:
+            raise RuntimeError("Current image is not loaded")
+        if not isinstance(roi_mask, np.ndarray):
+            raise TypeError("ROI segmentation did not return a numpy mask")
+        if task.roi is None:
+            raise ValueError("ROI task missing roi")
+        x0, y0, x1, y1 = task.roi
+        target_shape = (y1 - y0, x1 - x0)
+        if roi_mask.shape != target_shape:
+            raise ValueError(f"ROI mask shape mismatch: expected {target_shape}, got {roi_mask.shape}")
+
+        image_shape = self._image_shape_for_item(task.image_item)
+        label_name = task.target_label_name
+        if label_name is None or label_name not in task.image_item.labels:
+            label_name = self.label_service.make_default_name(task.image_item)
+            label = self.label_service.create_label(task.image_item, label_name, image_shape, color=(255, 255, 255))
+        else:
+            label = task.image_item.labels[label_name]
+            if label.locked:
+                raise RuntimeError("Target label is locked")
+            label.ensure_mask(image_shape)
+
+        assert label.mask is not None
+        region = label.mask[y0:y1, x0:x1]
+        region[roi_mask > 0] = 255
+        label.dirty = True
+        label.imported_only = True
+        return label
+
+    def _image_shape_for_item(self, item: ImageItem) -> tuple[int, int]:
+        """获取图片高宽；当前图优先用内存图像，后台完成的旧图用 QImage 查询。"""
+
+        if item is self.current_image_item and self.current_image_rgb is not None:
+            return self.current_image_rgb.shape[:2]
+        image = QImage(str(item.path))
+        if image.isNull():
+            raise RuntimeError(f"Failed to read image: {item.path}")
+        return image.height(), image.width()
 
     def _clear_segment_worker(self) -> None:
         self._segment_thread = None
@@ -1847,6 +1998,28 @@ class MainWindow(QMainWindow):
         self._set_tool_buttons()
         self._update_status()
 
+    def set_auto_segment_algorithm(self, algorithm: str) -> None:
+        """设置全图和框选分割共用的算法。"""
+
+        if algorithm not in {"classical", "fr_unet"}:
+            return
+        self.auto_segment_algorithm = algorithm
+        self._refresh_algorithm_menu()
+        self._update_status(
+            self._tr("status.algorithm_selected", "Segmentation algorithm: {algorithm}").format(
+                algorithm=self._algorithm_display_name(algorithm)
+            )
+        )
+
+    def _refresh_algorithm_menu(self) -> None:
+        self.algorithm_action_classical.setChecked(self.auto_segment_algorithm == "classical")
+        self.algorithm_action_fr_unet.setChecked(self.auto_segment_algorithm == "fr_unet")
+
+    def _algorithm_display_name(self, algorithm: str) -> str:
+        if algorithm == "fr_unet":
+            return "FR-UNet"
+        return self._tr("algorithm.classical", "Classical")
+
     def _set_brush(self, size: float) -> None:
         value = max(0.5, min(500.0, float(size)))
         self.canvas.set_brush_size(value)
@@ -2042,6 +2215,8 @@ class MainWindow(QMainWindow):
             if tool == "brush"
             else self._tr("tool.eraser", "eraser")
             if tool == "eraser"
+            else self._tr("tool.segment_box", "box-segment")
+            if tool == "segment_box"
             else tool
         )
         base = (
