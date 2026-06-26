@@ -373,7 +373,7 @@ class MainWindow(QMainWindow):
         main_toolbar.addAction(self.toolbar_install_fr_unet_action)
 
         self.toolbar_auto_segment_action = QAction("Auto Segment", self)
-        self.toolbar_auto_segment_action.setToolTip("Run FR-UNet and create an editable auto_vessel label.")
+        self.toolbar_auto_segment_action.setToolTip("Create an editable large-vessel auto_vessel label.")
         self.toolbar_auto_segment_action.triggered.connect(self.auto_segment_current_image)
         main_toolbar.addAction(self.toolbar_auto_segment_action)
 
@@ -759,7 +759,7 @@ class MainWindow(QMainWindow):
         )
         self.toolbar_auto_segment_action.setText(self._tr("toolbar.auto_segment", "Auto Segment"))
         self.toolbar_auto_segment_action.setToolTip(
-            self._tr("tooltip.toolbar_auto_segment", "Run FR-UNet and create an editable auto_vessel label.")
+            self._tr("tooltip.toolbar_auto_segment", "Create an editable large-vessel auto_vessel label.")
         )
         self.toolbar_export_action.setText(self._tr("toolbar.export_png", "Export PNG"))
         self.toolbar_export_action.setToolTip(

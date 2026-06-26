@@ -13,7 +13,7 @@ from vesselme.services.model_runtime_manager import ModelRuntimeManager
 
 
 class AutoSegmentService:
-    """把 FR-UNet 子进程输出转换为 VesselMe 当前图片的标签数据。"""
+    """生成自动分割 mask，并转换为 VesselMe 当前图片的标签数据。"""
 
     def __init__(self, runtime_manager: ModelRuntimeManager | None = None) -> None:
         self.runtime_manager = runtime_manager or ModelRuntimeManager()
@@ -31,8 +31,8 @@ class AutoSegmentService:
     ) -> np.ndarray:
         """调用自动分割后端生成同尺寸 mask。
 
-        当前默认使用 Clarus 传统血管增强路径。FR-UNet DRIVE 权重对超广角图域外失效，
-        继续默认使用会生成非血管散点，违背预标注目标。
+        当前默认目标是生成大血管辅助标注底稿。FR-UNet DRIVE 权重对超广角图域外失效，
+        继续默认使用会生成非血管散点，违背“减少手工清噪”的真实目标。
         """
 
         return normalize_mask(segment_clarus_vessels(image_path, cancel_event=cancel_event))
