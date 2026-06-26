@@ -64,9 +64,7 @@ class InstallFrUnetWorker(QObject):
 
     def run(self) -> None:
         try:
-            if self.backend == "fr_unet":
-                result = self.runtime_manager.install()
-            elif self.backend == "u2net_e":
+            if self.backend == "u2net_e":
                 result = self.runtime_manager.install_u2net_e()
             elif self.backend == "lwnet_hrf":
                 result = self.runtime_manager.install_lwnet()
@@ -93,6 +91,8 @@ class AutoSegmentWorker(QObject):
         image_path: Path,
         algorithm: str,
         roi: tuple[int, int, int, int] | None,
+        full_image_scale_long_edge: int | None,
+        full_image_threshold_mode: str,
         cancel_event: threading.Event,
     ) -> None:
         super().__init__()
@@ -101,6 +101,8 @@ class AutoSegmentWorker(QObject):
         self.image_path = image_path
         self.algorithm = algorithm
         self.roi = roi
+        self.full_image_scale_long_edge = full_image_scale_long_edge
+        self.full_image_threshold_mode = full_image_threshold_mode
         self.cancel_event = cancel_event
 
     def run(self) -> None:
@@ -109,6 +111,8 @@ class AutoSegmentWorker(QObject):
                 self.image_path,
                 algorithm=self.algorithm,
                 roi=self.roi,
+                full_image_scale_long_edge=self.full_image_scale_long_edge,
+                full_image_threshold_mode=self.full_image_threshold_mode,
                 cancel_event=self.cancel_event,
             )
             self.finished.emit(self.task_id, "done", mask, "")
@@ -129,6 +133,8 @@ class AutoSegmentTask:
     image_item: ImageItem
     algorithm: str
     roi: tuple[int, int, int, int] | None = None
+    full_image_scale_long_edge: int | None = None
+    full_image_threshold_mode: str = "normal"
     target_label_name: str | None = None
     status: str = "queued"
     error: str = ""
@@ -166,6 +172,8 @@ class MainWindow(QMainWindow):
         self.auto_segment_tasks: list[AutoSegmentTask] = []
         self.current_auto_segment_task_id: int | None = None
         self.auto_segment_algorithm = "classical"
+        self.auto_segment_full_scale_long_edge: int | None = 2048
+        self.auto_segment_full_threshold_mode = "normal"
 
         self.setProperty("space_pressed", False)
         self._build_ui()
@@ -268,21 +276,6 @@ class MainWindow(QMainWindow):
         row1.addWidget(self.btn_new_label)
         row1.addWidget(self.btn_import)
 
-        row_ai = QHBoxLayout()
-        self.btn_install_fr_unet = QPushButton("Install FR-UNet")
-        self.btn_install_fr_unet.clicked.connect(self.install_fr_unet)
-        self.btn_install_u2net_e = QPushButton("Install U²Net-E")
-        self.btn_install_u2net_e.clicked.connect(self.install_u2net_e)
-        self.btn_install_lwnet = QPushButton("Install LWNet")
-        self.btn_install_lwnet.clicked.connect(self.install_lwnet)
-        self.btn_auto_segment = QPushButton("Auto Segment")
-        self.btn_auto_segment.setObjectName("primary")
-        self.btn_auto_segment.clicked.connect(self.auto_segment_current_image)
-        row_ai.addWidget(self.btn_install_fr_unet)
-        row_ai.addWidget(self.btn_install_u2net_e)
-        row_ai.addWidget(self.btn_install_lwnet)
-        row_ai.addWidget(self.btn_auto_segment)
-
         row4 = QHBoxLayout()
         self.btn_save = QPushButton("Save (Ctrl+S)")
         self.btn_save.setObjectName("primary")
@@ -340,7 +333,6 @@ class MainWindow(QMainWindow):
 
         label_layout.addWidget(self.side_tabs, 1)
         label_layout.addLayout(row1)
-        label_layout.addLayout(row_ai)
         self.brush_size_title = QLabel("Brush size")
         label_layout.addWidget(self.brush_size_title)
         label_layout.addLayout(brush_row)
@@ -394,11 +386,6 @@ class MainWindow(QMainWindow):
         self.toolbar_import_image_action.setToolTip("Import a mask image, binarize it, and attach it to a label.")
         self.toolbar_import_image_action.triggered.connect(self.import_label_from_image)
         main_toolbar.addAction(self.toolbar_import_image_action)
-
-        self.toolbar_install_fr_unet_action = QAction("Install FR-UNet", self)
-        self.toolbar_install_fr_unet_action.setToolTip("Install the independent FR-UNet runtime and official DRIVE weights.")
-        self.toolbar_install_fr_unet_action.triggered.connect(self.install_fr_unet)
-        main_toolbar.addAction(self.toolbar_install_fr_unet_action)
 
         self.toolbar_install_u2net_e_action = QAction("Install U²Net-E", self)
         self.toolbar_install_u2net_e_action.setToolTip("Install the independent U²Net-E runtime and official ONNX weights.")
@@ -498,6 +485,7 @@ class MainWindow(QMainWindow):
         left_toolbar.addWidget(left_spacer)
 
         self.btn_settings_tool = QToolButton()
+        self.btn_settings_tool.setObjectName("settingsToolButton")
         self.btn_settings_tool.setText("⚙")
         self.btn_settings_tool.setToolTip("Settings")
         self.btn_settings_tool.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -506,15 +494,41 @@ class MainWindow(QMainWindow):
         self.algorithm_action_classical = self.algorithm_menu.addAction("Classical")
         self.algorithm_action_classical.setCheckable(True)
         self.algorithm_action_classical.triggered.connect(lambda: self.set_auto_segment_algorithm("classical"))
-        self.algorithm_action_fr_unet = self.algorithm_menu.addAction("FR-UNet")
-        self.algorithm_action_fr_unet.setCheckable(True)
-        self.algorithm_action_fr_unet.triggered.connect(lambda: self.set_auto_segment_algorithm("fr_unet"))
         self.algorithm_action_u2net_e = self.algorithm_menu.addAction("U²Net-E")
         self.algorithm_action_u2net_e.setCheckable(True)
         self.algorithm_action_u2net_e.triggered.connect(lambda: self.set_auto_segment_algorithm("u2net_e"))
         self.algorithm_action_lwnet = self.algorithm_menu.addAction("LWNet HRF")
         self.algorithm_action_lwnet.setCheckable(True)
         self.algorithm_action_lwnet.triggered.connect(lambda: self.set_auto_segment_algorithm("lwnet_hrf"))
+        self.scale_menu = self.settings_menu.addMenu("Auto segment scale")
+        self.scale_action_512 = self.scale_menu.addAction("512")
+        self.scale_action_512.setCheckable(True)
+        self.scale_action_512.triggered.connect(lambda: self.set_auto_segment_full_scale(512))
+        self.scale_action_1024 = self.scale_menu.addAction("1024")
+        self.scale_action_1024.setCheckable(True)
+        self.scale_action_1024.triggered.connect(lambda: self.set_auto_segment_full_scale(1024))
+        self.scale_action_2048 = self.scale_menu.addAction("2048")
+        self.scale_action_2048.setCheckable(True)
+        self.scale_action_2048.triggered.connect(lambda: self.set_auto_segment_full_scale(2048))
+        self.scale_action_3072 = self.scale_menu.addAction("3072")
+        self.scale_action_3072.setCheckable(True)
+        self.scale_action_3072.triggered.connect(lambda: self.set_auto_segment_full_scale(3072))
+        self.scale_action_original = self.scale_menu.addAction("Original")
+        self.scale_action_original.setCheckable(True)
+        self.scale_action_original.triggered.connect(lambda: self.set_auto_segment_full_scale(None))
+        self.threshold_menu = self.settings_menu.addMenu("Auto segment threshold")
+        self.threshold_action_normal = self.threshold_menu.addAction("Normal")
+        self.threshold_action_normal.setCheckable(True)
+        self.threshold_action_normal.triggered.connect(lambda: self.set_auto_segment_full_threshold("normal"))
+        self.threshold_action_thin = self.threshold_menu.addAction("Thin")
+        self.threshold_action_thin.setCheckable(True)
+        self.threshold_action_thin.triggered.connect(lambda: self.set_auto_segment_full_threshold("thin"))
+        self.threshold_action_thinner = self.threshold_menu.addAction("Thinner")
+        self.threshold_action_thinner.setCheckable(True)
+        self.threshold_action_thinner.triggered.connect(lambda: self.set_auto_segment_full_threshold("thinner"))
+        self.threshold_action_thinnest = self.threshold_menu.addAction("Thinnest")
+        self.threshold_action_thinnest.setCheckable(True)
+        self.threshold_action_thinnest.triggered.connect(lambda: self.set_auto_segment_full_threshold("thinnest"))
         self.btn_settings_tool.setMenu(self.settings_menu)
         left_toolbar.addWidget(self.btn_settings_tool)
 
@@ -667,6 +681,10 @@ class MainWindow(QMainWindow):
                 image: none;
                 width: 0px;
             }
+            QToolButton#settingsToolButton::menu-indicator {
+                image: none;
+                width: 0px;
+            }
             QLineEdit, QDoubleSpinBox {
                 background: #ffffff;
                 border: 1px solid #bcccdc;
@@ -701,10 +719,6 @@ class MainWindow(QMainWindow):
         self.menu_import_image_action = QAction("Import Label from Image", self)
         self.menu_import_image_action.triggered.connect(self.import_label_from_image)
         self.file_menu.addAction(self.menu_import_image_action)
-
-        self.menu_install_fr_unet_action = QAction("Install FR-UNet", self)
-        self.menu_install_fr_unet_action.triggered.connect(self.install_fr_unet)
-        self.file_menu.addAction(self.menu_install_fr_unet_action)
 
         self.menu_install_u2net_e_action = QAction("Install U²Net-E", self)
         self.menu_install_u2net_e_action.triggered.connect(self.install_u2net_e)
@@ -794,10 +808,6 @@ class MainWindow(QMainWindow):
         self.btn_open_folder.setText(self._tr("btn.open_folder", "Open Folder"))
         self.btn_new_label.setText(self._tr("btn.new", "New"))
         self.btn_import.setText(self._tr("btn.import_label_tar", "Import label (.tar)"))
-        self.btn_install_fr_unet.setText(self._tr("btn.install_fr_unet", "Install FR-UNet"))
-        self.btn_install_u2net_e.setText(self._tr("btn.install_u2net_e", "Install U²Net-E"))
-        self.btn_install_lwnet.setText(self._tr("btn.install_lwnet", "Install LWNet"))
-        self.btn_auto_segment.setText(self._tr("btn.auto_segment", "Auto Segment"))
         self.btn_save.setText(self._tr("btn.save_ctrl_s", "Save (Ctrl+S)"))
         self.btn_export.setText(self._tr("btn.export_stroke_png", "Export Stroke PNG"))
         self.label_name_edit.setPlaceholderText(self._tr("placeholder.selected_label_name", "Selected label name"))
@@ -831,13 +841,6 @@ class MainWindow(QMainWindow):
         self.toolbar_import_image_action.setText(self._tr("toolbar.import_from_image", "Import from image"))
         self.toolbar_import_image_action.setToolTip(
             self._tr("tooltip.toolbar_import_image", "Import a mask image, binarize it, and attach it to a label.")
-        )
-        self.toolbar_install_fr_unet_action.setText(self._tr("toolbar.install_fr_unet", "Install FR-UNet"))
-        self.toolbar_install_fr_unet_action.setToolTip(
-            self._tr(
-                "tooltip.toolbar_install_fr_unet",
-                "Install the independent FR-UNet runtime and official DRIVE weights.",
-            )
         )
         self.toolbar_install_u2net_e_action.setText(self._tr("toolbar.install_u2net_e", "Install U²Net-E"))
         self.toolbar_install_u2net_e_action.setToolTip(
@@ -878,10 +881,22 @@ class MainWindow(QMainWindow):
         self.btn_settings_tool.setToolTip(self._tr("tooltip.settings", "Settings"))
         self.algorithm_menu.setTitle(self._tr("menu.segmentation_algorithm", "Segmentation algorithm"))
         self.algorithm_action_classical.setText(self._tr("menu.algorithm_classical", "Classical"))
-        self.algorithm_action_fr_unet.setText(self._tr("menu.algorithm_fr_unet", "FR-UNet"))
         self.algorithm_action_u2net_e.setText(self._tr("menu.algorithm_u2net_e", "U²Net-E"))
         self.algorithm_action_lwnet.setText(self._tr("menu.algorithm_lwnet", "LWNet HRF"))
+        self.scale_menu.setTitle(self._tr("menu.auto_segment_scale", "Auto segment scale"))
+        self.scale_action_512.setText(self._tr("menu.scale_512", "512"))
+        self.scale_action_1024.setText(self._tr("menu.scale_1024", "1024"))
+        self.scale_action_2048.setText(self._tr("menu.scale_2048", "2048"))
+        self.scale_action_3072.setText(self._tr("menu.scale_3072", "3072"))
+        self.scale_action_original.setText(self._tr("menu.scale_original", "Original"))
+        self.threshold_menu.setTitle(self._tr("menu.auto_segment_threshold", "Auto segment threshold"))
+        self.threshold_action_normal.setText(self._tr("menu.threshold_normal", "Normal"))
+        self.threshold_action_thin.setText(self._tr("menu.threshold_thin", "Thin"))
+        self.threshold_action_thinner.setText(self._tr("menu.threshold_thinner", "Thinner"))
+        self.threshold_action_thinnest.setText(self._tr("menu.threshold_thinnest", "Thinnest"))
         self._refresh_algorithm_menu()
+        self._refresh_full_scale_menu()
+        self._refresh_full_threshold_menu()
 
         self.lang_menu_button.setText("EN ▾" if self.current_language == "en" else "中 ▾")
         self.lang_menu_button.setToolTip(self._tr("tooltip.switch_language", "Switch UI language"))
@@ -898,7 +913,6 @@ class MainWindow(QMainWindow):
         self.menu_save_action.setText(self._tr("menu.save_current_label", "Save Current Label"))
         self.menu_import_action.setText(self._tr("menu.import_label_tar", "Import Label Tar"))
         self.menu_import_image_action.setText(self._tr("menu.import_label_from_image", "Import Label from Image"))
-        self.menu_install_fr_unet_action.setText(self._tr("menu.install_fr_unet", "Install FR-UNet"))
         self.menu_install_u2net_e_action.setText(self._tr("menu.install_u2net_e", "Install U²Net-E"))
         self.menu_install_lwnet_action.setText(self._tr("menu.install_lwnet", "Install LWNet"))
         self.menu_auto_segment_action.setText(self._tr("menu.auto_segment", "Auto Segment"))
@@ -1336,10 +1350,25 @@ class MainWindow(QMainWindow):
                 )
             )
             algorithm_label.setProperty("muted", True)
+            scale_label = QLabel(
+                self._tr("task.full_scale", "Scale: {scale}").format(
+                    scale=self._full_scale_display_name(task.full_image_scale_long_edge)
+                )
+            )
+            scale_label.setProperty("muted", True)
+            threshold_label = QLabel(
+                self._tr("task.full_threshold", "Threshold: {threshold}").format(
+                    threshold=self._threshold_mode_display_name(task.full_image_threshold_mode)
+                )
+            )
+            threshold_label.setProperty("muted", True)
 
             text_col.addWidget(name_label)
             text_col.addWidget(status_label)
             text_col.addWidget(algorithm_label)
+            if task.roi is None:
+                text_col.addWidget(scale_label)
+                text_col.addWidget(threshold_label)
             if task.status == "failed" and task.error:
                 error_label = QLabel(task.error[:160])
                 error_label.setWordWrap(True)
@@ -1574,11 +1603,6 @@ class MainWindow(QMainWindow):
             ).format(label_name=label.label_name)
         )
 
-    def install_fr_unet(self) -> None:
-        """从 UI 触发 FR-UNet 独立运行时安装。"""
-
-        self._install_backend("fr_unet")
-
     def install_u2net_e(self) -> None:
         """从 UI 触发 U²Net-E 独立运行时安装。"""
 
@@ -1656,6 +1680,8 @@ class MainWindow(QMainWindow):
             task_id=next(self._task_id_counter),
             image_item=item,
             algorithm=self.auto_segment_algorithm,
+            full_image_scale_long_edge=self.auto_segment_full_scale_long_edge,
+            full_image_threshold_mode=self.auto_segment_full_threshold_mode,
         )
         self.auto_segment_tasks.append(task)
         self.side_tabs.setCurrentWidget(self.tasks_tab)
@@ -1699,6 +1725,8 @@ class MainWindow(QMainWindow):
             image_item=item,
             algorithm=self.auto_segment_algorithm,
             roi=(x0, y0, x1, y1),
+            full_image_scale_long_edge=None,
+            full_image_threshold_mode="normal",
             target_label_name=target_label_name,
         )
         self.auto_segment_tasks.append(task)
@@ -1740,6 +1768,8 @@ class MainWindow(QMainWindow):
             next_task.image_path,
             next_task.algorithm,
             next_task.roi,
+            next_task.full_image_scale_long_edge,
+            next_task.full_image_threshold_mode,
             next_task.cancel_event,
         )
         self._segment_worker.moveToThread(self._segment_thread)
@@ -1855,13 +1885,8 @@ class MainWindow(QMainWindow):
     def _set_ai_buttons_enabled(self, enabled: bool) -> None:
         """统一控制 AI 安装按钮状态；分割按钮由任务队列允许重复提交不同样本。"""
 
-        self.btn_install_fr_unet.setEnabled(enabled)
-        self.btn_install_u2net_e.setEnabled(enabled)
-        self.btn_install_lwnet.setEnabled(enabled)
-        self.toolbar_install_fr_unet_action.setEnabled(enabled)
         self.toolbar_install_u2net_e_action.setEnabled(enabled)
         self.toolbar_install_lwnet_action.setEnabled(enabled)
-        self.menu_install_fr_unet_action.setEnabled(enabled)
         self.menu_install_u2net_e_action.setEnabled(enabled)
         self.menu_install_lwnet_action.setEnabled(enabled)
 
@@ -2088,7 +2113,7 @@ class MainWindow(QMainWindow):
     def set_auto_segment_algorithm(self, algorithm: str) -> None:
         """设置全图和框选分割共用的算法。"""
 
-        if algorithm not in {"classical", "fr_unet", "u2net_e", "lwnet_hrf"}:
+        if algorithm not in {"classical", "u2net_e", "lwnet_hrf"}:
             return
         self.auto_segment_algorithm = algorithm
         self._refresh_algorithm_menu()
@@ -2098,20 +2123,78 @@ class MainWindow(QMainWindow):
             )
         )
 
+    def set_auto_segment_full_scale(self, long_edge: int | None) -> None:
+        """设置全图自动分割缩放长边；框选分割始终按 ROI 原尺寸执行。"""
+
+        if long_edge not in {512, 1024, 2048, 3072, None}:
+            return
+        self.auto_segment_full_scale_long_edge = long_edge
+        self._refresh_full_scale_menu()
+        self._update_status(
+            self._tr("status.full_scale_selected", "Auto segment scale: {scale}").format(
+                scale=self._full_scale_display_name(long_edge)
+            )
+        )
+
+    def set_auto_segment_full_threshold(self, threshold_mode: str) -> None:
+        """设置全图自动分割阈值模式；框选分割不使用该参数。"""
+
+        if threshold_mode not in {"normal", "thin", "thinner", "thinnest"}:
+            return
+        self.auto_segment_full_threshold_mode = threshold_mode
+        self._refresh_full_threshold_menu()
+        self._update_status(
+            self._tr("status.full_threshold_selected", "Auto segment threshold: {threshold}").format(
+                threshold=self._threshold_mode_display_name(threshold_mode)
+            )
+        )
+
     def _refresh_algorithm_menu(self) -> None:
         self.algorithm_action_classical.setChecked(self.auto_segment_algorithm == "classical")
-        self.algorithm_action_fr_unet.setChecked(self.auto_segment_algorithm == "fr_unet")
         self.algorithm_action_u2net_e.setChecked(self.auto_segment_algorithm == "u2net_e")
         self.algorithm_action_lwnet.setChecked(self.auto_segment_algorithm == "lwnet_hrf")
 
+    def _refresh_full_scale_menu(self) -> None:
+        """刷新全图缩放菜单的勾选状态。"""
+
+        self.scale_action_512.setChecked(self.auto_segment_full_scale_long_edge == 512)
+        self.scale_action_1024.setChecked(self.auto_segment_full_scale_long_edge == 1024)
+        self.scale_action_2048.setChecked(self.auto_segment_full_scale_long_edge == 2048)
+        self.scale_action_3072.setChecked(self.auto_segment_full_scale_long_edge == 3072)
+        self.scale_action_original.setChecked(self.auto_segment_full_scale_long_edge is None)
+
+    def _refresh_full_threshold_menu(self) -> None:
+        """刷新全图阈值模式菜单的勾选状态。"""
+
+        self.threshold_action_normal.setChecked(self.auto_segment_full_threshold_mode == "normal")
+        self.threshold_action_thin.setChecked(self.auto_segment_full_threshold_mode == "thin")
+        self.threshold_action_thinner.setChecked(self.auto_segment_full_threshold_mode == "thinner")
+        self.threshold_action_thinnest.setChecked(self.auto_segment_full_threshold_mode == "thinnest")
+
     def _algorithm_display_name(self, algorithm: str) -> str:
-        if algorithm == "fr_unet":
-            return "FR-UNet"
         if algorithm == "u2net_e":
             return "U²Net-E"
         if algorithm == "lwnet_hrf":
             return "LWNet HRF"
         return self._tr("algorithm.classical", "Classical")
+
+    def _full_scale_display_name(self, long_edge: int | None) -> str:
+        """显示全图自动分割缩放档位。"""
+
+        if long_edge is None:
+            return self._tr("scale.original", "Original")
+        return str(long_edge)
+
+    def _threshold_mode_display_name(self, threshold_mode: str) -> str:
+        """显示全图自动分割阈值模式。"""
+
+        if threshold_mode == "thin":
+            return self._tr("threshold.thin", "Thin")
+        if threshold_mode == "thinner":
+            return self._tr("threshold.thinner", "Thinner")
+        if threshold_mode == "thinnest":
+            return self._tr("threshold.thinnest", "Thinnest")
+        return self._tr("threshold.normal", "Normal")
 
     def _set_brush(self, size: float) -> None:
         value = max(0.5, min(500.0, float(size)))

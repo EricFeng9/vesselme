@@ -208,9 +208,12 @@ class ModelRuntimeManager:
         patch_size: int = 384,
         stride: int = 192,
         threshold: float = 0.5,
+        output_kind: str = "mask",
     ) -> list[str]:
         """构造 U²Net-E ONNX 推理命令。"""
 
+        if output_kind not in {"mask", "probability"}:
+            raise ValueError(f"Unknown U²Net-E output kind: {output_kind}")
         status = self.u2net_e_status()
         if not status.runtime_ready:
             raise RuntimeError(f"U²Net-E runtime is not installed: {self.u2net_e_runtime_python}")
@@ -232,6 +235,8 @@ class ModelRuntimeManager:
             str(stride),
             "--threshold",
             str(threshold),
+            "--output-kind",
+            output_kind,
         ]
 
     def build_lwnet_runner_command(

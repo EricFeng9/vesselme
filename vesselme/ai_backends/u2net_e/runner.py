@@ -111,11 +111,17 @@ def probability_to_mask(probability: np.ndarray, threshold: float) -> np.ndarray
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="U²Net-E ONNX inference for VesselMe.")
     parser.add_argument("--input", required=True, help="输入眼底图片路径")
-    parser.add_argument("--output", required=True, help="输出 mask.npy 路径")
+    parser.add_argument("--output", required=True, help="输出 .npy 路径")
     parser.add_argument("--model", required=True, help="u2net_e.onnx 路径")
     parser.add_argument("--patch-size", type=int, default=384, help="滑窗 patch 边长；官方 ONNX 固定输入 384")
     parser.add_argument("--stride", type=int, default=192, help="滑窗步长")
     parser.add_argument("--threshold", type=float, default=0.5, help="概率阈值")
+    parser.add_argument(
+        "--output-kind",
+        choices=("mask", "probability"),
+        default="mask",
+        help="输出二值 mask 或 0~1 概率图；全图缩放模式使用概率图避免低分辨率二值块放大。",
+    )
     return parser
 
 
@@ -128,10 +134,13 @@ def main() -> None:
         patch_size=args.patch_size,
         stride=args.stride,
     )
-    mask = probability_to_mask(probability, args.threshold)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    np.save(output, mask)
+    if args.output_kind == "probability":
+        np.save(output, probability.astype(np.float32))
+    else:
+        mask = probability_to_mask(probability, args.threshold)
+        np.save(output, mask)
 
 
 if __name__ == "__main__":
